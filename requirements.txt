@@ -1,0 +1,5 @@
+# Runtime dependency for the desktop UI.
+PySide6>=6.7,<7
+
+# Build backend used by pyproject.toml for editable installs and packaging.
+setuptools>=68

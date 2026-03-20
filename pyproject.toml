@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lazy-adb"
+version = "0.1.0"
+description = "Bootstrap MVP for a customer-facing ADB support wrapper."
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.7,<7",
+]
+
+[tool.setuptools]
+packages = ["core", "ui", "utils"]
