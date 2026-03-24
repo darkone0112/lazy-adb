@@ -2,20 +2,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QSize, QTimer
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from core.adb_manager import ADBManager, DeviceInfoResult
 from core.device_info import DeviceInfo
-from core.device_state import DeviceConnection, DeviceConnectionState
+from core.device_state import ConnectionMode, DeviceConnection, DeviceConnectionState, ListedDevice, filter_devices_for_mode
 from core.exporter import SupportPackageExporter
 from core.log_capture import LogCaptureManager
 from core.platform_tools_bootstrap import PlatformToolsBootstrapper
 from ui.action_bar import ActionBar
 from ui.activity_panel import ActivityPanel
 from ui.central_panel import CentralPanel
+from ui.guide_window import GuideWindow
 from ui.status_panel import StatusPanel
+from ui.wireless_setup_window import WirelessSetupWindow
 from utils.platform_paths import describe_host_system
 
 
@@ -27,10 +29,13 @@ class MainWindow(QMainWindow):
         self.capture_manager = LogCaptureManager(self.adb_manager)
         self.exporter = SupportPackageExporter()
         self.platform_tools_bootstrapper = PlatformToolsBootstrapper()
+        self.connection_mode = ConnectionMode.USB
         self.current_connection = DeviceConnection(state=DeviceConnectionState.NO_DEVICE)
         self.current_device_info: DeviceInfo | None = None
         self.latest_log_path: Path | None = None
         self.latest_adb_version_output = ""
+        self._available_devices: list[ListedDevice] = []
+        self._preferred_device_serial: str | None = None
         self._last_adb_status = ""
         self._last_connection_signature: tuple[str | None, str | None, str | None] | None = None
         self._capture_log_offset = 0
@@ -38,13 +43,15 @@ class MainWindow(QMainWindow):
         self._platform_tools_bootstrap_failed = False
 
         self.setWindowTitle("Lazy ADB Wizard")
-        self.resize(1280, 860)
-        self.setMinimumSize(1180, 820)
 
         self.action_bar = ActionBar()
         self.central_panel = CentralPanel()
         self.status_panel = StatusPanel()
         self.activity_panel = ActivityPanel()
+        self.guide_window: GuideWindow | None = None
+        self.wireless_setup_window: WirelessSetupWindow | None = None
+        self.usb_mode_button = QPushButton("USB")
+        self.wifi_mode_button = QPushButton("Wi-Fi")
         self.status_timer = QTimer(self)
         self.status_timer.setInterval(2000)
         self.capture_tail_timer = QTimer(self)
@@ -56,28 +63,44 @@ class MainWindow(QMainWindow):
         self.status_panel.set_system_status(describe_host_system(), tone="info")
         self.status_panel.set_capture_status("Idle", tone="warn")
         self.activity_panel.setMinimumHeight(180)
+        self.central_panel.set_mode(self.connection_mode)
         self.central_panel.show_guidance(self.current_connection)
         self._sync_action_state()
+        self._apply_window_sizing()
         QTimer.singleShot(0, self._startup_refresh)
 
     def _build_layout(self) -> None:
         title = QLabel("Lazy ADB Wizard")
         title.setObjectName("HeaderTitle")
 
+        mode_toggle = QWidget()
+        mode_layout = QHBoxLayout(mode_toggle)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(6)
+        self.usb_mode_button.setObjectName("ModeToggle")
+        self.wifi_mode_button.setObjectName("ModeToggle")
+        self.usb_mode_button.setCheckable(True)
+        self.wifi_mode_button.setCheckable(True)
+        self.usb_mode_button.setChecked(True)
+        mode_layout.addWidget(self.usb_mode_button)
+        mode_layout.addWidget(self.wifi_mode_button)
+
         header_widget = QWidget()
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(16)
         header_layout.addWidget(title)
+        header_layout.addStretch()
         self.status_panel.setMinimumWidth(520)
         self.status_panel.setMaximumWidth(900)
         header_layout.addWidget(self.status_panel)
-        header_layout.addStretch()
+        header_layout.addWidget(mode_toggle)
 
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
+        self.main_layout = layout
         layout.addWidget(header_widget)
         layout.addWidget(self.action_bar)
         layout.addWidget(self.central_panel, stretch=3)
@@ -260,6 +283,37 @@ class MainWindow(QMainWindow):
                 color: #6e7681;
                 border-color: #30363d;
             }
+            QPushButton#ModeToggle {
+                min-width: 72px;
+                padding: 8px 12px;
+                background: #161b22;
+                border: 1px solid #30363d;
+                color: #8b949e;
+            }
+            QPushButton#ModeToggle:hover {
+                background: #1c2531;
+                border-color: #58a6ff;
+                color: #dce6f3;
+            }
+            QPushButton#ModeToggle:checked {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1f6feb, stop:1 #2f81f7);
+                border-color: #58a6ff;
+                color: #f0f6fc;
+            }
+            QLineEdit, QComboBox {
+                background: #0f1620;
+                color: #e6edf3;
+                border: 1px solid #30363d;
+                border-radius: 10px;
+                padding: 8px 10px;
+            }
+            QLineEdit:focus, QComboBox:focus {
+                border-color: #58a6ff;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 18px;
+            }
             QToolButton#CopyButton {
                 min-width: 16px;
                 max-width: 16px;
@@ -312,11 +366,17 @@ class MainWindow(QMainWindow):
         )
 
     def _connect_signals(self) -> None:
+        self.usb_mode_button.clicked.connect(lambda: self.on_connection_mode_selected(ConnectionMode.USB))
+        self.wifi_mode_button.clicked.connect(lambda: self.on_connection_mode_selected(ConnectionMode.WIFI))
         self.action_bar.check_connection_requested.connect(self.on_check_connection)
+        self.action_bar.open_guide_requested.connect(self.on_open_guide)
+        self.action_bar.device_selected.connect(self.on_device_selected)
         self.action_bar.refresh_device_info_requested.connect(self.on_refresh_device_info)
         self.action_bar.start_capture_requested.connect(self.on_start_capture)
         self.action_bar.stop_capture_requested.connect(self.on_stop_capture)
         self.action_bar.export_package_requested.connect(self.on_export_package)
+        self.central_panel.open_wireless_setup_requested.connect(self.on_open_wireless_setup)
+        self.central_panel.disconnect_requested.connect(self.on_disconnect_wireless)
         self.status_timer.timeout.connect(self.on_poll_status)
         self.capture_tail_timer.timeout.connect(self._poll_capture_log)
 
@@ -324,11 +384,16 @@ class MainWindow(QMainWindow):
         if not self._ensure_platform_tools_available(log_changes=True, allow_retry=True):
             return
         self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
+        if self.current_connection.state is not DeviceConnectionState.READY:
+            self._show_feedback_popup(
+                title="Connection Status",
+                message=self._friendly_state_summary(self.current_connection),
+                tone="warn",
+            )
 
     def on_refresh_device_info(self) -> None:
         if self.current_connection.state is not DeviceConnectionState.READY or not self.current_connection.serial:
-            self.activity_panel.set_summary("No ready device is selected yet.")
-            self.activity_panel.set_summary_tone("warn")
+            self._set_activity_summary("No ready device is selected yet.", "warn", popup=True, popup_title="Refresh Device Info")
             self.activity_panel.append_message("Check the connection first so the application can choose a device.")
             return
 
@@ -342,18 +407,151 @@ class MainWindow(QMainWindow):
             tooltip=self._friendly_state_summary(self.current_connection),
         )
 
+    def on_device_selected(self, serial: str) -> None:
+        if serial == self._preferred_device_serial:
+            return
+
+        self._preferred_device_serial = serial
+        self.activity_panel.append_message(f"Switched active target to {serial}.")
+        self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
+
+    def on_open_guide(self) -> None:
+        if self.guide_window is None:
+            self.guide_window = GuideWindow(self)
+            self.guide_window.setStyleSheet(self.styleSheet())
+        self.guide_window.show_for_mode(self.connection_mode)
+
+    def on_open_wireless_setup(self) -> None:
+        if self.wireless_setup_window is None:
+            self.wireless_setup_window = WirelessSetupWindow(self)
+            self.wireless_setup_window.setStyleSheet(self.styleSheet())
+            self.wireless_setup_window.pair_requested.connect(self.on_pair_wireless)
+            self.wireless_setup_window.connect_requested.connect(self.on_connect_wireless)
+        self.wireless_setup_window.set_controls_enabled(
+            not self._platform_tools_bootstrap_failed and self.capture_manager.active_session is None
+        )
+        self.wireless_setup_window.show()
+        self.wireless_setup_window.raise_()
+        self.wireless_setup_window.activateWindow()
+
+    def on_connection_mode_selected(self, mode: ConnectionMode) -> None:
+        if self.capture_manager.active_session is not None or mode is self.connection_mode:
+            self._sync_mode_buttons()
+            return
+
+        self.connection_mode = mode
+        self._preferred_device_serial = None
+        self._available_devices = []
+        self.current_device_info = None
+        self.current_connection = DeviceConnection(state=DeviceConnectionState.NO_DEVICE)
+        self.action_bar.set_device_choices(choices=[], selected_serial=None, enabled=False)
+        self.central_panel.set_mode(mode)
+        self.central_panel.show_guidance(self.current_connection)
+        self._set_activity_summary(
+            "Wireless ADB mode is active. Pair or connect a device from the main panel."
+            if mode is ConnectionMode.WIFI
+            else "USB ADB mode is active. Connect a device by cable or check the current connection."
+            ,
+            "info",
+        )
+        self.activity_panel.append_message(
+            "Switched to Wireless ADB mode."
+            if mode is ConnectionMode.WIFI
+            else "Switched to USB ADB mode."
+        )
+        self._sync_mode_buttons()
+        self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
+
+    def on_pair_wireless(self, host: str, port: str, pairing_code: str) -> None:
+        if self.connection_mode is not ConnectionMode.WIFI:
+            return
+        if not host or not port or not pairing_code:
+            self._set_activity_summary(
+                "Wireless pairing needs host, pairing port, and pairing code.",
+                "warn",
+                popup=True,
+                popup_title="Wireless Pairing",
+            )
+            return
+        if not port.isdigit():
+            self._set_activity_summary("The pairing port must be numeric.", "warn", popup=True, popup_title="Wireless Pairing")
+            return
+        if not self._ensure_platform_tools_available(log_changes=True, allow_retry=True):
+            return
+
+        self.activity_panel.append_message(f"Pairing with {host}:{port}.")
+        result = self.adb_manager.pair_device(host, port, pairing_code)
+        self.activity_panel.append_message(self._describe_command_feedback(result))
+        if result.success:
+            self._set_activity_summary("Wireless pairing succeeded. Connect using the device's debug port.", "ready")
+        else:
+            self._set_activity_summary("Wireless pairing failed.", "error")
+            self._show_feedback_popup(title="Wireless Pairing", message=result.describe(), tone="error")
+
+    def on_connect_wireless(self, host: str, port: str) -> None:
+        if self.connection_mode is not ConnectionMode.WIFI:
+            return
+        if not host or not port:
+            self._set_activity_summary("Wireless connect needs a host and connect port.", "warn", popup=True, popup_title="Wireless Connect")
+            return
+        if not port.isdigit():
+            self._set_activity_summary("The connect port must be numeric.", "warn", popup=True, popup_title="Wireless Connect")
+            return
+        if not self._ensure_platform_tools_available(log_changes=True, allow_retry=True):
+            return
+
+        endpoint = f"{host}:{port}"
+        self.activity_panel.append_message(f"Connecting to {endpoint}.")
+        result = self.adb_manager.connect_device(host, port)
+        self.activity_panel.append_message(self._describe_command_feedback(result))
+        if not result.success:
+            self._set_activity_summary("Wireless connection failed.", "error")
+            self._show_feedback_popup(title="Wireless Connect", message=result.describe(), tone="error")
+            return
+
+        self._preferred_device_serial = endpoint
+        self._set_activity_summary("Wireless connection succeeded.", "ready")
+        self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
+
+    def on_disconnect_wireless(self, target: str) -> None:
+        if self.connection_mode is not ConnectionMode.WIFI:
+            return
+
+        endpoint = target.strip() or (self.current_connection.serial or "")
+        if not endpoint:
+            self._set_activity_summary(
+                "Provide a connected wireless endpoint before disconnecting.",
+                "warn",
+                popup=True,
+                popup_title="Wireless Disconnect",
+            )
+            return
+        if not self._ensure_platform_tools_available(log_changes=True, allow_retry=True):
+            return
+
+        self.activity_panel.append_message(f"Disconnecting {endpoint}.")
+        result = self.adb_manager.disconnect_device(endpoint)
+        self.activity_panel.append_message(self._describe_command_feedback(result))
+        if result.success:
+            if self._preferred_device_serial == endpoint:
+                self._preferred_device_serial = None
+            self._set_activity_summary("Wireless device disconnected.", "warn", popup=True, popup_title="Wireless Disconnect")
+        else:
+            self._set_activity_summary("Wireless disconnect failed.", "error")
+            self._show_feedback_popup(title="Wireless Disconnect", message=result.describe(), tone="error")
+        self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
+
     def on_start_capture(self) -> None:
         if self.current_connection.state is not DeviceConnectionState.READY or not self.current_connection.serial:
-            self.activity_panel.set_summary("No ready device is available for capture.")
-            self.activity_panel.set_summary_tone("warn")
+            self._set_activity_summary("No ready device is available for capture.", "warn", popup=True, popup_title="Start Capture")
             self.activity_panel.append_message("Connect and authorize a device before starting logcat capture.")
             return
 
         result = self.capture_manager.start_capture(self.current_connection.serial)
         if not result.success or result.session is None:
-            self.activity_panel.set_summary("Log capture could not be started.")
-            self.activity_panel.set_summary_tone("error")
+            self._set_activity_summary("Log capture could not be started.", "error")
             self.activity_panel.append_message(result.message)
+            self._show_feedback_popup(title="Start Capture", message=result.message, tone="error")
             return
 
         self.central_panel.show_capture_state(
@@ -361,8 +559,7 @@ class MainWindow(QMainWindow):
             str(result.session.log_path),
             "Logcat is being written live to disk. Reproduce the issue, then stop the capture.",
         )
-        self.activity_panel.set_summary("Log capture is running.")
-        self.activity_panel.set_summary_tone("ready")
+        self._set_activity_summary("Log capture is running.", "ready")
         self.activity_panel.append_message(result.message)
         self.latest_log_path = result.session.log_path
         self._capture_log_offset = 0
@@ -376,11 +573,11 @@ class MainWindow(QMainWindow):
         self._flush_capture_log(final=True)
         self.capture_tail_timer.stop()
         if not result.success:
-            self.activity_panel.set_summary("Log capture could not be stopped cleanly.")
-            self.activity_panel.set_summary_tone("error")
+            self._set_activity_summary("Log capture could not be stopped cleanly.", "error")
             self.activity_panel.append_message(result.message)
             if result.stderr.strip():
                 self.activity_panel.append_message(result.stderr.strip())
+            self._show_feedback_popup(title="Stop Capture", message=result.message, tone="error")
             self.status_panel.set_capture_status("Capture stopped with issues", tone="error")
             self._sync_action_state()
             return
@@ -397,8 +594,7 @@ class MainWindow(QMainWindow):
         else:
             self.central_panel.show_guidance(self.current_connection)
 
-        self.activity_panel.set_summary("Log capture stopped and the file is ready for export.")
-        self.activity_panel.set_summary_tone("warn")
+        self._set_activity_summary("Log capture stopped and the file is ready for export.", "warn", popup=True, popup_title="Capture Complete")
         self.activity_panel.append_message(result.message)
         if result.stderr.strip():
             self.activity_panel.append_message(result.stderr.strip())
@@ -413,13 +609,12 @@ class MainWindow(QMainWindow):
             adb_version_output=self.latest_adb_version_output,
         )
         if result.success:
-            self.activity_panel.set_summary("Support package created successfully.")
-            self.activity_panel.set_summary_tone("ready")
+            self._set_activity_summary("Support package created successfully.", "ready")
             self.activity_panel.append_message(result.message)
         else:
-            self.activity_panel.set_summary("Support package could not be created.")
-            self.activity_panel.set_summary_tone("error")
+            self._set_activity_summary("Support package could not be created.", "error")
             self.activity_panel.append_message(result.message)
+            self._show_feedback_popup(title="Export Package", message=result.message, tone="error")
         self._sync_action_state()
 
     def on_poll_status(self) -> None:
@@ -436,6 +631,14 @@ class MainWindow(QMainWindow):
             return True
 
         if self._platform_tools_bootstrap_failed and not allow_retry:
+            self._available_devices = []
+            self._preferred_device_serial = None
+            self.action_bar.set_device_choices(choices=[], selected_serial=None, enabled=False)
+            self.central_panel.set_wireless_action_state(
+                has_device=False,
+                pairing_enabled=False,
+                disconnect_enabled=False,
+            )
             self.status_panel.set_adb_status(
                 "Inactive",
                 tone="error",
@@ -443,8 +646,12 @@ class MainWindow(QMainWindow):
             )
             return False
 
-        self.activity_panel.set_summary("Bundled platform-tools are missing. Downloading the package for this system.")
-        self.activity_panel.set_summary_tone("warn")
+        self._set_activity_summary("Bundled platform-tools are missing. Downloading the package for this system.", "warn")
+        self.central_panel.set_wireless_action_state(
+            has_device=False,
+            pairing_enabled=False,
+            disconnect_enabled=False,
+        )
         self.status_panel.set_adb_status("Inactive", tone="error", tooltip="Downloading platform-tools...")
         self.status_panel.set_connection_status(
             "Disconnected",
@@ -463,8 +670,12 @@ class MainWindow(QMainWindow):
             self._platform_tools_bootstrap_failed = False
             if result.downloaded:
                 self.activity_panel.append_message(result.message)
-            self.activity_panel.set_summary("Platform-tools are ready.")
-            self.activity_panel.set_summary_tone("ready")
+            self._set_activity_summary("Platform-tools are ready.", "ready")
+            self.central_panel.set_wireless_action_state(
+                has_device=bool(self._available_devices),
+                pairing_enabled=self.capture_manager.active_session is None,
+                disconnect_enabled=self.capture_manager.active_session is None and self.current_connection.serial is not None,
+            )
             self.status_panel.set_adb_status(
                 "Active",
                 tone="ready",
@@ -473,13 +684,21 @@ class MainWindow(QMainWindow):
             return True
 
         self._platform_tools_bootstrap_failed = True
+        self._available_devices = []
+        self._preferred_device_serial = None
+        self.action_bar.set_device_choices(choices=[], selected_serial=None, enabled=False)
+        self.central_panel.set_wireless_action_state(
+            has_device=False,
+            pairing_enabled=False,
+            disconnect_enabled=False,
+        )
         self.current_connection = DeviceConnection(
             state=DeviceConnectionState.ERROR,
             detail=result.message,
         )
-        self.activity_panel.set_summary("Platform-tools download failed. Retry after restoring network access.")
-        self.activity_panel.set_summary_tone("error")
+        self._set_activity_summary("Platform-tools download failed. Retry after restoring network access.", "error")
         self.activity_panel.append_message(result.message)
+        self._show_feedback_popup(title="Platform-Tools Download", message=result.message, tone="error")
         self.status_panel.set_adb_status("Inactive", tone="error", tooltip="Platform-tools download failed.")
         self.status_panel.set_connection_status(
             "Disconnected",
@@ -511,6 +730,14 @@ class MainWindow(QMainWindow):
                 self.activity_panel.append_message(adb_status)
 
         if not adb_result.success:
+            self._available_devices = []
+            self._preferred_device_serial = None
+            self.action_bar.set_device_choices(choices=[], selected_serial=None, enabled=False)
+            self.central_panel.set_wireless_action_state(
+                has_device=False,
+                pairing_enabled=False,
+                disconnect_enabled=False,
+            )
             self.current_connection = DeviceConnection(
                 state=DeviceConnectionState.ERROR,
                 detail=adb_result.describe(),
@@ -524,12 +751,24 @@ class MainWindow(QMainWindow):
             if self.capture_manager.active_session is None:
                 self.central_panel.show_guidance(self.current_connection)
             if log_changes:
-                self.activity_panel.set_summary("ADB is unavailable, so device detection could not continue.")
-                self.activity_panel.set_summary_tone("error")
+                self._set_activity_summary("ADB is unavailable, so device detection could not continue.", "error")
             self._sync_action_state()
             return
 
-        discovery = self.adb_manager.detect_devices()
+        discovery = self.adb_manager.detect_devices(
+            preferred_serial=self._preferred_device_serial,
+            mode=self.connection_mode,
+        )
+        self._available_devices = filter_devices_for_mode(discovery.devices, self.connection_mode)
+        self.central_panel.set_wireless_action_state(
+            has_device=self.connection_mode is ConnectionMode.WIFI and bool(self._available_devices),
+            pairing_enabled=self.connection_mode is ConnectionMode.WIFI and self.capture_manager.active_session is None,
+            disconnect_enabled=(
+                self.connection_mode is ConnectionMode.WIFI
+                and self.capture_manager.active_session is None
+                and discovery.connection.serial is not None
+            ),
+        )
         previous_signature = self._last_connection_signature
         current_signature = (
             discovery.connection.state.value,
@@ -539,6 +778,16 @@ class MainWindow(QMainWindow):
         connection_changed = current_signature != previous_signature
         self._last_connection_signature = current_signature
         self.current_connection = discovery.connection
+        if self.current_connection.serial is not None:
+            self._preferred_device_serial = self.current_connection.serial
+        elif not self._available_devices:
+            self._preferred_device_serial = None
+
+        self.action_bar.set_device_choices(
+            choices=[(self._format_device_choice(device), device.serial) for device in self._available_devices],
+            selected_serial=self._preferred_device_serial,
+            enabled=self.capture_manager.active_session is None,
+        )
         self.status_panel.set_connection_status(
             "Connected" if self.current_connection.state is DeviceConnectionState.READY else "Disconnected",
             tone=self._connection_tone(self.current_connection),
@@ -563,8 +812,7 @@ class MainWindow(QMainWindow):
                 )
             elif self.capture_manager.active_session is None and self.current_device_info is not None:
                 self.central_panel.show_device_info(self.current_device_info)
-            self.activity_panel.set_summary("Device detection is active and up to date.")
-            self.activity_panel.set_summary_tone("ready")
+            self._set_activity_summary("Device detection is active and up to date.", "ready")
         else:
             self.current_device_info = None
             if self.capture_manager.active_session is None:
@@ -572,11 +820,18 @@ class MainWindow(QMainWindow):
             if connection_changed and log_changes:
                 self.activity_panel.append_message(self._friendly_state_summary(self.current_connection))
             if self.current_connection.state is DeviceConnectionState.NO_DEVICE:
-                self.activity_panel.set_summary("No ready device was detected. Follow the setup guidance if needed.")
-                self.activity_panel.set_summary_tone("warn")
+                self._set_activity_summary(
+                    "No wireless device was detected. Use the pairing form if needed."
+                    if self.connection_mode is ConnectionMode.WIFI
+                    else "No ready device was detected. Follow the setup guidance if needed."
+                    ,
+                    "warn",
+                )
             else:
-                self.activity_panel.set_summary(self._friendly_state_summary(self.current_connection))
-                self.activity_panel.set_summary_tone(self._connection_tone(self.current_connection))
+                self._set_activity_summary(
+                    self._friendly_state_summary(self.current_connection),
+                    self._connection_tone(self.current_connection),
+                )
 
         self._sync_action_state()
 
@@ -587,8 +842,7 @@ class MainWindow(QMainWindow):
                 self.central_panel.show_device_info(result.device_info)
             if announce_success:
                 self.activity_panel.append_message("Device information loaded successfully.")
-            self.activity_panel.set_summary("Device information is up to date.")
-            self.activity_panel.set_summary_tone("ready")
+            self._set_activity_summary("Device information is up to date.", "ready")
             self.status_panel.set_connection_status(
                 "Connected" if self.current_connection.state is DeviceConnectionState.READY else "Disconnected",
                 tone=self._connection_tone(self.current_connection),
@@ -604,8 +858,10 @@ class MainWindow(QMainWindow):
                 self.current_connection.serial,
                 detail_message,
             )
-        self.activity_panel.set_summary("A target is connected, but it did not provide usable Android device information.")
-        self.activity_panel.set_summary_tone("error")
+        self._set_activity_summary(
+            "A target is connected, but it did not provide usable Android device information.",
+            "error",
+        )
         self.activity_panel.append_message(detail_message)
         self.status_panel.set_connection_status(
             "Connected" if self.current_connection.state is DeviceConnectionState.READY else "Disconnected",
@@ -617,18 +873,34 @@ class MainWindow(QMainWindow):
     def _friendly_state_summary(self, connection: DeviceConnection) -> str:
         match connection.state:
             case DeviceConnectionState.NO_DEVICE:
-                return "No device is connected yet."
+                return (
+                    "No wireless device is connected yet."
+                    if self.connection_mode is ConnectionMode.WIFI
+                    else "No device is connected yet."
+                )
             case DeviceConnectionState.UNAUTHORIZED:
                 serial = connection.serial or "The device"
-                return f"{serial} was found, but authorization still needs to be accepted on the device."
+                return (
+                    f"{serial} was found, but authorization still needs to be accepted on the device."
+                    if self.connection_mode is ConnectionMode.USB
+                    else f"{serial} was found over Wi-Fi, but authorization still needs to be accepted on the device."
+                )
             case DeviceConnectionState.OFFLINE:
                 serial = connection.serial or "The device"
-                return f"{serial} is visible to ADB, but the connection is offline."
+                return (
+                    f"{serial} is visible to ADB, but the connection is offline."
+                    if self.connection_mode is ConnectionMode.USB
+                    else f"{serial} is visible to ADB over Wi-Fi, but the connection is offline."
+                )
             case DeviceConnectionState.ERROR:
                 return connection.detail or "ADB returned an unexpected result."
             case DeviceConnectionState.READY:
                 serial = connection.serial or "The device"
-                return f"{serial} is ready."
+                return (
+                    f"{serial} is ready."
+                    if self.connection_mode is ConnectionMode.USB
+                    else f"{serial} is ready over Wi-Fi."
+                )
 
     def _connection_tone(self, connection: DeviceConnection) -> str:
         match connection.state:
@@ -648,6 +920,33 @@ class MainWindow(QMainWindow):
             first_line = next((line for line in result.stdout.splitlines() if line.strip()), "ADB is available.")
             return first_line
         return result.describe()
+
+    def _set_activity_summary(
+        self,
+        message: str,
+        tone: str,
+        *,
+        popup: bool = False,
+        popup_title: str | None = None,
+    ) -> None:
+        self.activity_panel.set_summary_state(message, tone)
+        if popup and tone in {"warn", "error"}:
+            self._show_feedback_popup(
+                title=popup_title or ("Warning" if tone == "warn" else "Error"),
+                message=message,
+                tone=tone,
+            )
+
+    def _show_feedback_popup(self, *, title: str, message: str, tone: str) -> None:
+        if tone == "error":
+            QMessageBox.critical(self, title, message)
+        else:
+            QMessageBox.warning(self, title, message)
+
+    def _apply_window_sizing(self) -> None:
+        target_size = self.sizeHint().expandedTo(QSize(1380, 940))
+        self.resize(target_size)
+        self.setMinimumSize(target_size)
 
     def _poll_capture_log(self) -> None:
         self._flush_capture_log(final=False)
@@ -681,11 +980,50 @@ class MainWindow(QMainWindow):
         ready_device = self.current_connection.state is DeviceConnectionState.READY
         capture_running = self.capture_manager.active_session is not None
         export_ready = self.current_device_info is not None or self.latest_log_path is not None
+        self.usb_mode_button.setEnabled(not capture_running)
+        self.wifi_mode_button.setEnabled(not capture_running)
+        self._sync_mode_buttons()
+        wireless_ready = not capture_running and not self._platform_tools_bootstrap_failed
+        self.central_panel.set_wireless_action_state(
+            has_device=self.connection_mode is ConnectionMode.WIFI and bool(self._available_devices),
+            pairing_enabled=self.connection_mode is ConnectionMode.WIFI and wireless_ready,
+            disconnect_enabled=(
+                self.connection_mode is ConnectionMode.WIFI
+                and wireless_ready
+                and self.current_connection.serial is not None
+            ),
+        )
+        if self.wireless_setup_window is not None:
+            self.wireless_setup_window.set_controls_enabled(wireless_ready)
         self.action_bar.set_capture_controls(
             ready_device=ready_device,
             capture_running=capture_running,
             export_ready=export_ready,
+            device_selection_enabled=not capture_running,
         )
+
+    def _format_device_choice(self, device: ListedDevice) -> str:
+        state_label = {
+            "device": "Ready",
+            "unauthorized": "Unauthorized",
+            "offline": "Offline",
+        }.get(device.raw_state, device.raw_state.replace("_", " ").title())
+        return f"{device.serial} · {state_label}"
+
+    def _describe_command_feedback(self, result) -> str:
+        if result.success:
+            first_line = next((line.strip() for line in result.stdout.splitlines() if line.strip()), "")
+            if first_line:
+                return first_line
+        return result.describe()
+
+    def _sync_mode_buttons(self) -> None:
+        self.usb_mode_button.blockSignals(True)
+        self.wifi_mode_button.blockSignals(True)
+        self.usb_mode_button.setChecked(self.connection_mode is ConnectionMode.USB)
+        self.wifi_mode_button.setChecked(self.connection_mode is ConnectionMode.WIFI)
+        self.usb_mode_button.blockSignals(False)
+        self.wifi_mode_button.blockSignals(False)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self.capture_manager.active_session is not None:

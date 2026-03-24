@@ -6,6 +6,7 @@ import subprocess
 
 from core.device_info import DeviceInfo, detect_getprop_problem, parse_getprop_output
 from core.device_state import (
+    ConnectionMode,
     DeviceConnection,
     DeviceConnectionState,
     ListedDevice,
@@ -123,7 +124,23 @@ class ADBManager:
     def clear_logcat(self, serial: str) -> CommandResult:
         return self.run(["logcat", "-c"], serial=serial, timeout=12.0)
 
-    def detect_devices(self) -> DeviceDiscovery:
+    def pair_device(self, host: str, port: str, pairing_code: str) -> CommandResult:
+        return self.run(["pair", f"{host}:{port}", pairing_code], timeout=20.0)
+
+    def connect_device(self, host: str, port: str) -> CommandResult:
+        return self.run(["connect", f"{host}:{port}"], timeout=20.0)
+
+    def disconnect_device(self, target: str | None = None) -> CommandResult:
+        args = ["disconnect"]
+        if target:
+            args.append(target)
+        return self.run(args, timeout=20.0)
+
+    def detect_devices(
+        self,
+        preferred_serial: str | None = None,
+        mode: ConnectionMode = ConnectionMode.USB,
+    ) -> DeviceDiscovery:
         result = self.run(["devices"])
         devices = parse_adb_devices_output(result.stdout)
 
@@ -133,7 +150,11 @@ class ADBManager:
                 detail=result.describe(),
             )
         else:
-            connection = select_preferred_device(devices)
+            connection = select_preferred_device(
+                devices,
+                preferred_serial=preferred_serial,
+                mode=mode,
+            )
 
         return DeviceDiscovery(
             command_result=result,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from PySide6.QtCore import Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -7,6 +8,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QStackedLayout,
     QToolButton,
     QVBoxLayout,
@@ -14,46 +16,107 @@ from PySide6.QtWidgets import (
 )
 
 from core.device_info import DeviceInfo
-from core.device_state import DeviceConnection, describe_connection_state
+from core.device_state import ConnectionMode, DeviceConnection, DeviceConnectionState, describe_connection_state
+
+
+DEVICE_FIELD_NAMES = [
+    "Model",
+    "Manufacturer",
+    "Android Version",
+    "Device Name",
+    "Serial Number",
+    "Build ID",
+    "Fingerprint",
+]
 
 
 class CentralPanel(QWidget):
+    open_wireless_setup_requested = Signal()
+    disconnect_requested = Signal(str)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+
+        self._mode = ConnectionMode.USB
+        self._wireless_connection: DeviceConnection | None = None
 
         self.stack = QStackedLayout(self)
         self.guidance_page = self._build_guidance_page()
         self.device_page = self._build_device_page()
         self.capture_page = self._build_capture_page()
+        self.wireless_page = self._build_wireless_page()
         self.stack.addWidget(self.guidance_page)
         self.stack.addWidget(self.device_page)
         self.stack.addWidget(self.capture_page)
+        self.stack.addWidget(self.wireless_page)
+
+    def set_mode(self, mode: ConnectionMode) -> None:
+        self._mode = mode
+        if self.stack.currentWidget() is self.capture_page:
+            return
+        if mode is ConnectionMode.WIFI:
+            self.stack.setCurrentWidget(self.wireless_page)
+        else:
+            self.stack.setCurrentWidget(self.guidance_page)
+
+    def set_wireless_action_state(
+        self,
+        *,
+        has_device: bool,
+        pairing_enabled: bool,
+        disconnect_enabled: bool,
+    ) -> None:
+        self.wireless_pair_new_button.setEnabled(pairing_enabled)
+        self.wireless_disconnect_button.setVisible(has_device)
+        self.wireless_disconnect_button.setEnabled(disconnect_enabled)
+        self.wireless_target_badge.setVisible(has_device)
 
     def show_guidance(self, connection: DeviceConnection) -> None:
-        title, message, next_step = describe_connection_state(connection)
+        title, message, next_step = describe_connection_state(connection, mode=self._mode)
+        if self._mode is ConnectionMode.WIFI:
+            self._wireless_connection = connection
+            self.wireless_title.setText(title)
+            self._set_wireless_target(connection.serial)
+            self.wireless_status_label.setText(f"{message} Next step: {next_step}")
+            self._set_field_map_defaults(self.wireless_device_fields)
+            self.stack.setCurrentWidget(self.wireless_page)
+            return
+
         self.guidance_title.setText(title)
         self.guidance_message.setText(message)
         self.guidance_next_step.setText(f"Next step: {next_step}")
         self.stack.setCurrentWidget(self.guidance_page)
 
     def show_device_info(self, info: DeviceInfo) -> None:
-        self._set_device_field("Model", info.model)
-        self._set_device_field("Manufacturer", info.manufacturer)
-        self._set_device_field("Android Version", info.android_version)
-        self._set_device_field("Serial Number", info.serial_number)
-        self._set_device_field("Build ID", info.build_id)
-        self._set_device_field("Fingerprint", info.fingerprint)
-        self._set_device_field("Device Name", info.device_name)
+        field_map = self.wireless_device_fields if self._mode is ConnectionMode.WIFI else self.device_fields
+        self._populate_field_map(field_map, info)
+        if self._mode is ConnectionMode.WIFI:
+            self._wireless_connection = DeviceConnection(
+                state=DeviceConnectionState.READY,
+                serial=info.serial_number,
+            )
+            self.wireless_title.setText("Wireless ADB Setup")
+            self._set_wireless_target(info.serial_number)
+            self.wireless_status_label.setText(f"Wireless target connected and ready: {info.serial_number}")
+            self.stack.setCurrentWidget(self.wireless_page)
+            return
         self.stack.setCurrentWidget(self.device_page)
 
     def show_ready_without_info(self, serial: str, message: str) -> None:
-        self._set_device_field("Model", "Pending refresh")
-        self._set_device_field("Manufacturer", "Pending refresh")
-        self._set_device_field("Android Version", "Pending refresh")
-        self._set_device_field("Serial Number", serial)
-        self._set_device_field("Build ID", "Pending refresh")
-        self._set_device_field("Fingerprint", "Pending refresh")
-        self._set_device_field("Device Name", message)
+        field_map = self.wireless_device_fields if self._mode is ConnectionMode.WIFI else self.device_fields
+        self._set_field_map_defaults(field_map)
+        self._set_field(field_map, "Serial Number", serial)
+        self._set_field(field_map, "Device Name", message)
+        if self._mode is ConnectionMode.WIFI:
+            self._wireless_connection = DeviceConnection(
+                state=DeviceConnectionState.READY,
+                serial=serial,
+            )
+            self.wireless_title.setText("Wireless ADB Setup")
+            self._set_wireless_target(serial)
+            self.wireless_status_label.setText(message)
+            self.stack.setCurrentWidget(self.wireless_page)
+            return
         self.stack.setCurrentWidget(self.device_page)
 
     def show_capture_state(self, serial: str, log_path: str, message: str) -> None:
@@ -61,6 +124,9 @@ class CentralPanel(QWidget):
         self.capture_path_label.setText(log_path)
         self.capture_message_label.setText(message)
         self.stack.setCurrentWidget(self.capture_page)
+
+    def current_wireless_endpoint(self) -> str:
+        return self._wireless_connection.serial if self._wireless_connection and self._wireless_connection.serial else ""
 
     def _build_guidance_page(self) -> QWidget:
         card = QFrame()
@@ -71,7 +137,7 @@ class CentralPanel(QWidget):
         self.guidance_title.setObjectName("PanelTitle")
 
         self.guidance_message = QLabel(
-            "No device is ready yet. Follow the setup steps below before checking again."
+            "No device is ready yet. Use the setup guide if you need detailed instructions."
         )
         self.guidance_message.setObjectName("PanelSubtitle")
         self.guidance_message.setWordWrap(True)
@@ -82,22 +148,9 @@ class CentralPanel(QWidget):
         self.guidance_next_step.setObjectName("HintLabel")
         self.guidance_next_step.setWordWrap(True)
 
-        steps_layout = QVBoxLayout()
-        steps_layout.setSpacing(10)
-        for number, step in enumerate(
-            [
-                "Connect the Android device with a USB cable.",
-                "Open Settings on the device.",
-                "Enable Developer Options.",
-                "Enable USB Debugging.",
-                "Accept the authorization prompt on the device if it appears.",
-            ],
-            start=1,
-        ):
-            label = QLabel(f"{number}. {step}")
-            label.setObjectName("StepLabel")
-            label.setWordWrap(True)
-            steps_layout.addWidget(label)
+        help_box = QLabel("Need help with setup? Use the Open Guide button in the top action bar.")
+        help_box.setObjectName("StepLabel")
+        help_box.setWordWrap(True)
 
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(22, 22, 22, 22)
@@ -105,10 +158,7 @@ class CentralPanel(QWidget):
         card_layout.addWidget(self.guidance_title)
         card_layout.addWidget(self.guidance_message)
         card_layout.addWidget(self.guidance_next_step)
-        section_label = QLabel("Setup Guide")
-        section_label.setObjectName("SectionLabel")
-        card_layout.addWidget(section_label)
-        card_layout.addLayout(steps_layout)
+        card_layout.addWidget(help_box)
 
         wrapper = QWidget()
         wrapper_layout = QVBoxLayout(wrapper)
@@ -129,36 +179,7 @@ class CentralPanel(QWidget):
         subheading.setObjectName("PanelSubtitle")
         subheading.setWordWrap(True)
 
-        fields_widget = QWidget()
-        fields_layout = QFormLayout(fields_widget)
-        fields_layout.setContentsMargins(0, 0, 0, 0)
-        fields_layout.setHorizontalSpacing(14)
-        fields_layout.setVerticalSpacing(12)
-
-        self.device_fields: dict[str, QLabel] = {}
-        for field_name in [
-            "Model",
-            "Manufacturer",
-            "Android Version",
-            "Device Name",
-            "Serial Number",
-            "Build ID",
-            "Fingerprint",
-        ]:
-            value_label = QLabel("Unknown")
-            value_label.setWordWrap(True)
-            value_label.setObjectName("ValueLabel")
-            self.device_fields[field_name] = value_label
-
-            row_widget = QWidget()
-            row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(6)
-            row_layout.addWidget(value_label, stretch=1)
-            copy_button = self._build_copy_button(field_name)
-            copy_button.clicked.connect(lambda _checked=False, name=field_name: self._copy_field(name))
-            row_layout.addWidget(copy_button)
-            fields_layout.addRow(f"{field_name}:", row_widget)
+        fields_widget, self.device_fields = self._build_device_fields()
 
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(22, 22, 22, 22)
@@ -166,6 +187,60 @@ class CentralPanel(QWidget):
         card_layout.addWidget(heading)
         card_layout.addWidget(subheading)
         card_layout.addWidget(fields_widget)
+
+        wrapper = QWidget()
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.addWidget(card)
+        wrapper_layout.addStretch()
+        return wrapper
+
+    def _build_wireless_page(self) -> QWidget:
+        card = QFrame()
+        card.setObjectName("PrimaryCard")
+        card.setFrameShape(QFrame.StyledPanel)
+
+        self.wireless_title = QLabel("Wireless ADB Setup")
+        self.wireless_title.setObjectName("PanelTitle")
+
+        self.wireless_target_badge = QLabel("No Device")
+        self.wireless_target_badge.setObjectName("HeaderBadge")
+        self.wireless_target_badge.hide()
+
+        self.wireless_pair_new_button = QPushButton("Pair New Connection")
+        self.wireless_disconnect_button = QPushButton("Disconnect")
+        self.wireless_disconnect_button.hide()
+
+        title_row = QWidget()
+        title_layout = QHBoxLayout(title_row)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(10)
+        title_layout.addWidget(self.wireless_title)
+        title_layout.addStretch()
+        title_layout.addWidget(self.wireless_target_badge)
+        title_layout.addWidget(self.wireless_pair_new_button)
+        title_layout.addWidget(self.wireless_disconnect_button)
+
+        self.wireless_status_label = QLabel("No wireless target connected yet.")
+        self.wireless_status_label.setObjectName("HintLabel")
+        self.wireless_status_label.setWordWrap(True)
+
+        device_section = QLabel("Detected Device")
+        device_section.setObjectName("SectionLabel")
+
+        wireless_fields_widget, self.wireless_device_fields = self._build_device_fields()
+
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 22, 22, 22)
+        card_layout.setSpacing(14)
+        card_layout.addWidget(title_row)
+        card_layout.addWidget(self.wireless_status_label)
+        card_layout.addWidget(device_section)
+        card_layout.addWidget(wireless_fields_widget)
+
+        self.wireless_pair_new_button.clicked.connect(self.open_wireless_setup_requested.emit)
+        self.wireless_disconnect_button.clicked.connect(self._emit_disconnect_request)
+        self._set_field_map_defaults(self.wireless_device_fields)
 
         wrapper = QWidget()
         wrapper_layout = QVBoxLayout(wrapper)
@@ -222,11 +297,56 @@ class CentralPanel(QWidget):
         wrapper_layout.addStretch()
         return wrapper
 
-    def _set_device_field(self, field_name: str, value: str) -> None:
-        self.device_fields[field_name].setText(value)
+    def _build_device_fields(self) -> tuple[QWidget, dict[str, QLabel]]:
+        fields_widget = QWidget()
+        fields_layout = QFormLayout(fields_widget)
+        fields_layout.setContentsMargins(0, 0, 0, 0)
+        fields_layout.setHorizontalSpacing(14)
+        fields_layout.setVerticalSpacing(12)
 
-    def _copy_field(self, field_name: str) -> None:
-        QApplication.clipboard().setText(self.device_fields[field_name].text())
+        field_map: dict[str, QLabel] = {}
+        for field_name in DEVICE_FIELD_NAMES:
+            value_label = QLabel("Unknown")
+            value_label.setWordWrap(True)
+            value_label.setObjectName("ValueLabel")
+            field_map[field_name] = value_label
+
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            row_layout.addWidget(value_label, stretch=1)
+            copy_button = self._build_copy_button(field_name)
+            copy_button.clicked.connect(lambda _checked=False, label=value_label: self._copy_label(label))
+            row_layout.addWidget(copy_button)
+            fields_layout.addRow(f"{field_name}:", row_widget)
+
+        return fields_widget, field_map
+
+    def _populate_field_map(self, field_map: dict[str, QLabel], info: DeviceInfo) -> None:
+        self._set_field(field_map, "Model", info.model)
+        self._set_field(field_map, "Manufacturer", info.manufacturer)
+        self._set_field(field_map, "Android Version", info.android_version)
+        self._set_field(field_map, "Serial Number", info.serial_number)
+        self._set_field(field_map, "Build ID", info.build_id)
+        self._set_field(field_map, "Fingerprint", info.fingerprint)
+        self._set_field(field_map, "Device Name", info.device_name)
+
+    def _set_field_map_defaults(self, field_map: dict[str, QLabel]) -> None:
+        for field_name in DEVICE_FIELD_NAMES:
+            self._set_field(field_map, field_name, "Pending refresh")
+
+    def _set_field(self, field_map: dict[str, QLabel], field_name: str, value: str) -> None:
+        field_map[field_name].setText(value)
+
+    def _set_wireless_target(self, serial: str | None) -> None:
+        if serial:
+            self.wireless_target_badge.setText(serial)
+        else:
+            self.wireless_target_badge.setText("No Device")
+
+    def _copy_label(self, label: QLabel) -> None:
+        QApplication.clipboard().setText(label.text())
 
     def _build_copy_button(self, field_name: str) -> QToolButton:
         button = QToolButton()
@@ -239,3 +359,6 @@ class CentralPanel(QWidget):
         button.setAutoRaise(True)
         button.setFixedSize(16, 16)
         return button
+
+    def _emit_disconnect_request(self) -> None:
+        self.disconnect_requested.emit(self.current_wireless_endpoint())

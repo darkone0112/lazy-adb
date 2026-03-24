@@ -4,7 +4,10 @@ import unittest
 
 from core.device_info import detect_getprop_problem, parse_getprop_output
 from core.device_state import (
+    ConnectionMode,
     DeviceConnectionState,
+    filter_devices_for_mode,
+    is_wireless_serial,
     normalize_device_state,
     parse_adb_devices_output,
     select_preferred_device,
@@ -33,11 +36,63 @@ class DeviceStateParsingTests(unittest.TestCase):
         self.assertEqual(connection.state, DeviceConnectionState.READY)
         self.assertEqual(connection.serial, "READY01")
 
+    def test_select_preferred_device_honors_selected_serial(self) -> None:
+        output = (
+            "List of devices attached\n"
+            "READY01\tdevice\n"
+            "UNAUTH01\tunauthorized\n"
+        )
+        devices = parse_adb_devices_output(output)
+        connection = select_preferred_device(devices, preferred_serial="UNAUTH01")
+
+        self.assertEqual(connection.state, DeviceConnectionState.UNAUTHORIZED)
+        self.assertEqual(connection.serial, "UNAUTH01")
+
+    def test_select_preferred_device_filters_for_wireless_mode(self) -> None:
+        output = (
+            "List of devices attached\n"
+            "USB123\tdevice\n"
+            "192.168.1.22:40283\tdevice\n"
+        )
+        devices = parse_adb_devices_output(output)
+        connection = select_preferred_device(devices, mode=ConnectionMode.WIFI)
+
+        self.assertEqual(connection.state, DeviceConnectionState.READY)
+        self.assertEqual(connection.serial, "192.168.1.22:40283")
+
     def test_normalize_device_state_maps_supported_values(self) -> None:
         self.assertEqual(normalize_device_state("device"), DeviceConnectionState.READY)
         self.assertEqual(normalize_device_state("unauthorized"), DeviceConnectionState.UNAUTHORIZED)
         self.assertEqual(normalize_device_state("offline"), DeviceConnectionState.OFFLINE)
         self.assertEqual(normalize_device_state("mystery"), DeviceConnectionState.ERROR)
+
+    def test_wireless_helpers_identify_and_filter_wifi_serials(self) -> None:
+        devices = parse_adb_devices_output(
+            "List of devices attached\nUSB123\tdevice\n192.168.1.22:40283\tdevice\n"
+        )
+
+        self.assertFalse(is_wireless_serial("USB123"))
+        self.assertTrue(is_wireless_serial("192.168.1.22:40283"))
+        self.assertEqual(
+            [device.serial for device in filter_devices_for_mode(devices, ConnectionMode.WIFI)],
+            ["192.168.1.22:40283"],
+        )
+
+    def test_wireless_helpers_identify_mdns_tls_serials(self) -> None:
+        mdns_serial = "adb-R5CWC28JNYM._adb-tls-connect._tcp"
+        devices = parse_adb_devices_output(
+            f"List of devices attached\nUSB123\tdevice\n{mdns_serial}\tdevice\n"
+        )
+
+        self.assertTrue(is_wireless_serial(mdns_serial))
+        self.assertEqual(
+            [device.serial for device in filter_devices_for_mode(devices, ConnectionMode.USB)],
+            ["USB123"],
+        )
+        self.assertEqual(
+            [device.serial for device in filter_devices_for_mode(devices, ConnectionMode.WIFI)],
+            [mdns_serial],
+        )
 
 
 class DeviceInfoParsingTests(unittest.TestCase):
