@@ -38,7 +38,8 @@ class MainWindow(QMainWindow):
         self._platform_tools_bootstrap_failed = False
 
         self.setWindowTitle("Lazy ADB Wizard")
-        self.resize(1120, 760)
+        self.resize(1280, 860)
+        self.setMinimumSize(1180, 820)
 
         self.action_bar = ActionBar()
         self.central_panel = CentralPanel()
@@ -54,10 +55,9 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self.status_panel.set_system_status(describe_host_system(), tone="info")
         self.status_panel.set_capture_status("Idle", tone="warn")
-        self.activity_panel.setMaximumHeight(250)
+        self.activity_panel.setMinimumHeight(180)
         self.central_panel.show_guidance(self.current_connection)
         self._sync_action_state()
-        self.showMaximized()
         QTimer.singleShot(0, self._startup_refresh)
 
     def _build_layout(self) -> None:
@@ -80,8 +80,8 @@ class MainWindow(QMainWindow):
         layout.setSpacing(16)
         layout.addWidget(header_widget)
         layout.addWidget(self.action_bar)
-        layout.addWidget(self.central_panel, stretch=5)
-        layout.addWidget(self.activity_panel, stretch=1)
+        layout.addWidget(self.central_panel, stretch=3)
+        layout.addWidget(self.activity_panel, stretch=2)
         self.setCentralWidget(root)
 
     def _apply_styles(self) -> None:
