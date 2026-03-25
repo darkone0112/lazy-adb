@@ -1,42 +1,36 @@
 # Lazy ADB Wizard
 
-Lazy ADB Wizard is a PySide6 desktop application that helps support teams and testers collect Android diagnostics through ADB with a guided workflow. It supports both USB ADB and Wi-Fi ADB, can capture live `logcat`, export support packages, and includes a small advanced console for running direct ADB commands against the currently selected device.
+Lazy ADB Wizard is a desktop tool for collecting Android diagnostics through ADB without making people live in a terminal all day. It supports USB ADB, Wi-Fi ADB, live `logcat` capture, support-package export, and a built-in advanced console for when you still want to type commands manually because apparently suffering is part of the workflow.
 
-The application is designed to work in two delivery models:
+This README covers:
 
-- source mode, where the tool is launched with Python from the repository
-- portable packaged mode, where customers receive a folder containing `Lazy ADB Wizard.exe` and its runtime files
+- what the tool does
+- how to run it from source
+- how to use the USB and Wi-Fi flows
+- how capture and export work
+- how to build the Windows `.exe` with PyInstaller
 
-## What The Tool Does
+It does not try to be a startup pitch deck. Just the useful stuff.
 
-The current MVP includes:
+## Features
 
 - USB ADB workflow with guided setup
-- Wi-Fi ADB workflow with pairing and connect support
+- Wi-Fi ADB workflow with Android Wireless Debugging
 - automatic device detection and status refresh
-- multi-device selection when more than one device is connected
-- automatic first-run download of Google platform-tools when the current OS bundle is missing
+- multi-device selection when more than one target exists
+- automatic first-run download of Google platform-tools when the bundled ADB for the current OS is missing
 - live `logcat` capture
-- support package export as a `.zip`
+- export of support packages as `.zip`
 - advanced ADB command window for the selected device
-- fullscreen setup guides for USB and Wi-Fi
-- optional session debug logging for the application itself
-
-## Main Workflows
-
-The application supports these main use cases:
-
-1. A user connects an Android phone over USB, authorizes debugging, captures logs, and exports a support package.
-2. A user pairs an Android phone over Wireless Debugging, connects over Wi-Fi, captures logs, and exports a support package.
-3. A support engineer uses the Advanced window to run custom ADB commands on the selected device.
-4. A customer receives a portable build and runs the app without installing Python manually.
+- fullscreen USB and Wi-Fi setup guides
+- optional internal debug logging for the app itself
 
 ## Requirements
 
 ### Runtime
 
-- Python 3.11 or newer for source usage
-- a supported OS:
+- Python `3.11+` if you run from source
+- one of these operating systems:
   - Linux
   - Windows
   - macOS
@@ -44,38 +38,35 @@ The application supports these main use cases:
 
 ### Python Dependencies
 
-The project currently depends on:
+Current dependencies are listed in [requirements.txt](/home/javier/repos/lazy-adb/requirements.txt):
 
 - `PySide6>=6.7,<7`
 - `setuptools>=68`
 
-These are listed in [requirements.txt](/home/javier/repos/lazy-adb/requirements.txt).
-
 ## Repository Layout
 
-Important folders and files:
+Important paths:
 
-- [main.py](/home/javier/repos/lazy-adb/main.py): application entrypoint
-- [core/](/home/javier/repos/lazy-adb/core): ADB logic, log capture, exporting, bootstrap logic
+- [main.py](/home/javier/repos/lazy-adb/main.py): app entrypoint
+- [core/](/home/javier/repos/lazy-adb/core): ADB logic, capture, export, bootstrap
 - [ui/](/home/javier/repos/lazy-adb/ui): Qt windows and widgets
-- [utils/](/home/javier/repos/lazy-adb/utils): path helpers and file helpers
+- [utils/](/home/javier/repos/lazy-adb/utils): path and file helpers
 - [resources/platform-tools/](/home/javier/repos/lazy-adb/resources/platform-tools): bundled ADB location per OS
-- [output/](/home/javier/repos/lazy-adb/output): captures and exported support packages
-- [tests/](/home/javier/repos/lazy-adb/tests): unit tests
-- [android-logo.ico](/home/javier/repos/lazy-adb/android-logo.ico): runtime application icon
+- [output/](/home/javier/repos/lazy-adb/output): captures and exported packages
+- [tests/](/home/javier/repos/lazy-adb/tests): tests
 
 ## Running From Source
 
 ### 1. Create And Activate A Virtual Environment
 
-On Linux or macOS:
+Linux or macOS:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 ```
 
-On Windows PowerShell:
+Windows PowerShell:
 
 ```powershell
 py -3 -m venv venv
@@ -89,27 +80,27 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3. Start The Application
+### 3. Start The App
 
-On Linux or macOS:
+Linux or macOS:
 
 ```bash
 python3 main.py
 ```
 
-Or, if you are inside the venv:
+If the venv is active, this works too:
 
 ```bash
 python main.py
 ```
 
-On Windows:
+Windows:
 
 ```powershell
 python main.py
 ```
 
-## First Run Behavior And Platform-Tools
+## Platform-Tools Behavior
 
 The app expects ADB in these locations:
 
@@ -117,35 +108,33 @@ The app expects ADB in these locations:
 - `resources/platform-tools/linux/adb`
 - `resources/platform-tools/darwin/adb`
 
-If the platform-tools for the current OS are already present, the app uses them immediately.
+If the matching ADB binary for the current OS is already there, the app uses it.
 
-If they are missing, the app automatically downloads the correct Google archive for the current OS on first start:
+If it is missing, the app downloads Google platform-tools on first start:
 
 - Windows: `https://dl.google.com/android/repository/platform-tools-latest-windows.zip`
 - Linux: `https://dl.google.com/android/repository/platform-tools-latest-linux.zip`
 - macOS: `https://dl.google.com/android/repository/platform-tools-latest-darwin.zip`
 
-This behavior is useful for GitHub-distributed builds where the platform-tools are intentionally not committed to the repository.
+So yes, the repo can stay lighter and the app can still fix itself on first launch. For once, something behaves.
 
-## USB ADB Workflow
+## USB Workflow
 
-Typical USB flow:
+Normal USB flow:
 
 1. Launch the app.
-2. Connect the Android device with a data-capable USB cable.
-3. Unlock the device.
-4. If Android shows `Allow USB debugging`, approve it.
-5. Wait for the app to detect the device automatically.
+2. Connect the phone with a data-capable USB cable.
+3. Unlock the phone.
+4. Accept the `Allow USB debugging` prompt if Android shows it.
+5. Let the app detect the device automatically.
 6. If needed, click `Check Connection`.
-7. Review device information in the main panel.
+7. Review the device information.
 8. Click `Start Capture`.
-9. Reproduce the issue on the phone.
+9. Reproduce the issue.
 10. Click `Stop Capture`.
-11. Export the capture when needed.
+11. Export the support package if needed.
 
-### If USB Setup Has Never Been Done Before
-
-The USB guide in the app covers this, but the short version is:
+### If USB Debugging Was Never Enabled Before
 
 1. Open Android `Settings`.
 2. Open `About phone`.
@@ -153,107 +142,117 @@ The USB guide in the app covers this, but the short version is:
 4. Go back and open `Developer Options`.
 5. Enable `USB debugging`.
 6. Restart the device.
-7. Reconnect it and authorize the computer.
+7. Reconnect it and approve the computer.
 
-## Wi-Fi ADB Workflow
+## Wi-Fi Workflow
 
-Typical Wi-Fi flow:
+Normal Wi-Fi flow:
 
-1. Switch the app to `Wi-Fi` mode.
-2. If no wireless device is currently paired or connected, the wireless setup window opens automatically.
-3. Fill in the device IP and ports.
-4. Pair the device.
-5. Connect the device.
-6. Once connected, the device behaves like any other ready target in the app.
-7. Capture and export logs the same way as in USB mode.
+1. Switch the app to `Wi-Fi`.
+2. If no wireless device is detected after the app checks, the setup window opens.
+3. Fill `Host / IP`.
+4. Fill `Connect Port`.
+5. If this is a new pairing, also fill `Pair Port` and `Pairing Code`.
+6. Click `Connect Device`.
+7. The app will:
+   - pair and then connect if the pairing fields are filled
+   - connect only if the pairing fields are left empty
+8. Once connected, use the device exactly like a USB-connected target.
 
-### Important Wi-Fi Terminology
+### The Two Ports Android Shows
 
-The app uses two different ports because Wireless Debugging uses two different actions:
+Wireless Debugging uses two different ports:
 
-- `Connect Port`: shown on the main Android `Wireless debugging` screen next to the device IP
-- `Pairing Port`: shown only after tapping `Pair device with pairing code`
-- `Pairing Code`: also shown only inside `Pair device with pairing code`
+- `Connect Port`
+  - shown on the main `Wireless debugging` screen next to the device IP
+- `Pairing Port`
+  - shown only after tapping `Pair device with pairing code`
+- `Pairing Code`
+  - shown in that same pairing screen
 
-The device IP stays the same, but the connect port and pairing port are different.
+The IP usually stays the same.
+The pairing port and connect port are different.
+Because Android enjoys making simple things look suspicious.
 
 ### Recommended Wi-Fi Entry Order
 
-The guide is written around the simplest order:
+1. Open `Wireless debugging` on the phone.
+2. Copy the device IP.
+3. Copy the `Connect Port` first, because it is visible immediately.
+4. Tap `Pair device with pairing code`.
+5. Copy the `Pairing Port`.
+6. Copy the `Pairing Code`.
+7. Fill the app and click `Connect Device`.
 
-1. Find the device IP.
-2. Fill the `Connect Port` first, because Android shows it immediately on the main `Wireless debugging` screen.
-3. Then open `Pair device with pairing code` on the phone.
-4. Fill the `Pairing Port`.
-5. Fill the `Pairing Code`.
-6. Click `Pair Device`.
-7. Click `Connect`.
-
-### Enabling Wireless Debugging
-
-If the device has never been prepared before:
+### If Wireless Debugging Was Never Enabled Before
 
 1. Enable Developer Options by tapping `Build number` 7 times.
 2. Open `Developer Options`.
 3. Enable `USB debugging`.
 4. Enable `Wireless debugging`.
-5. Restart the device.
-6. Return to `Developer Options` and confirm `Wireless debugging` is still enabled.
+5. Restart the phone.
+6. Go back and confirm `Wireless debugging` is still enabled.
 
-## Multi-Device Handling
+### About Disconnect / Forget
 
-When multiple Android devices are available, the app enables a device selector.
+`Disconnect / Forget` disconnects the active wireless ADB session.
 
-- In USB mode, the selector lets the user choose between detected USB devices.
-- In Wi-Fi mode, wireless devices are handled separately from USB devices.
-- The selected device is the target used for capture, export metadata, and Advanced commands.
+It does not erase the pairing stored on the Android device. That part still has to be removed on the phone from the Wireless Debugging paired devices/computers list. The app shows that reminder on purpose, because pretending otherwise would be nonsense.
+
+## Multi-Device Behavior
+
+When more than one device is available:
+
+- USB mode shows a selector for USB devices
+- Wi-Fi mode shows a selector for Wi-Fi targets
+- the selected device is the target used for capture, export metadata, and Advanced commands
+
+USB and Wi-Fi targets are intentionally separated so the app does not mash them together into one confusing list.
 
 ## Capture And Live Feed
 
-The live feed shows ongoing activity and `logcat` output.
+The live feed shows app activity and streamed `logcat` output.
 
-General capture flow:
+Basic flow:
 
-1. Connect or pair a device until it is ready.
+1. Connect a ready device.
 2. Click `Start Capture`.
-3. Use the Android device to reproduce the issue.
-4. Watch the live feed for current activity and logs.
+3. Reproduce the issue.
+4. Watch the feed if useful.
 5. Click `Stop Capture`.
 
 After capture stops:
 
-- the app keeps the generated log file under `output/captures`
-- the capture completion dialog offers immediate export of the latest log
+- the log stays under `output/captures`
+- the stop-capture popup offers immediate export of the latest log
 
-## Exporting Support Packages
+## Exporting Logs
 
-The application can export support packages as `.zip` archives.
+Support packages are exported as `.zip` archives.
 
-Each export can include:
+They can contain:
 
-- metadata about the selected connection
-- device information, when available
+- connection metadata
+- device information if available
 - the selected `logcat` capture
 
-### Exporting The Latest Capture
+### Export The Latest Capture
 
-When you stop a capture, the completion popup includes an `Export` option. That path exports the most recent capture directly and does not ask the user to choose a log first.
+After stopping capture, use the `Export` button in the completion popup. That uses the latest captured log directly.
 
-### Exporting A Different Saved Capture
+### Export An Older Capture
 
-The `Export Package` action in the top action bar is for exporting an existing saved capture, not only the latest one.
+Use `Export Package` from the top bar:
 
-That flow is:
-
-1. Click `Export Package`.
-2. Choose a saved capture from the in-app export picker window.
-3. Choose where the resulting `.zip` should be saved.
+1. click `Export Package`
+2. choose one of the saved captures from the in-app picker
+3. choose where to save the resulting `.zip`
 
 ## Advanced Window
 
-The `Advanced` button opens a terminal-like ADB command window for the currently selected device.
+The `Advanced` button opens a terminal-style ADB window for the current device.
 
-You enter only the ADB subcommand. The app supplies the selected device target automatically.
+You only type the ADB subcommand. The app adds the selected device automatically.
 
 Examples:
 
@@ -264,79 +263,77 @@ shell pm list packages
 shell dumpsys battery
 ```
 
-The output appears in the same terminal-style window.
+Output appears in that same window.
 
 ## Output Structure
 
-By default, the repository uses these output folders:
+Relevant folders:
 
-- [output/captures](/home/javier/repos/lazy-adb/output/captures): captured `logcat` sessions
-- [output/exports](/home/javier/repos/lazy-adb/output/exports): exported support packages when an explicit destination is not chosen
+- [output/captures](/home/javier/repos/lazy-adb/output/captures): saved `logcat` sessions
+- [output/exports](/home/javier/repos/lazy-adb/output/exports): exported packages when no explicit destination is used
 
-In normal usage, the export flow asks the user where to save the final `.zip`.
+In the normal UI flow, export asks where to save the final `.zip`.
 
-## Hidden Application Debug Logging
+## Hidden Debug Logging
 
-The app includes an internal debug log intended to help investigate freezes or unexpected workflow behavior.
+The app has an internal debug log to help diagnose freezes or weird UI behavior.
 
 How to enable it:
 
-1. Launch the app.
-2. Triple-click the title at the top of the main window.
-3. A popup confirms that debug logging is enabled for the current session.
+1. launch the app
+2. triple-click the title at the top
+3. the app shows a popup confirming the log is enabled for this session
 
 Behavior:
 
-- the log is written as `lazy-adb-debug.log`
-- in source mode, it is written beside the project entrypoint
-- in packaged mode, it is written beside the executable
-- it resets to off when the app closes
+- the file is named `lazy-adb-debug.log`
+- in source mode it is written beside the project
+- in packaged mode it is written beside the executable
+- it turns off again when the app closes
 
-This log is useful for tracking:
+This log tracks things like:
 
 - background refresh cycles
-- GUI update skips or applications
-- ADB task starts and completions
-- other workflow events that may help diagnose stalls
+- GUI update decisions
+- ADB task start/finish events
+- state transitions
+
+Useful when the app decides to become dramatic.
 
 ## Running Tests
 
-Run all tests:
+Run the test suite:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-You can also verify the source files compile:
+Quick compile check:
 
 ```bash
 python -m compileall main.py core ui utils tests
 ```
 
-## Building A Portable Windows `.exe` With PyInstaller
+## Building The Windows `.exe` With PyInstaller
 
-The recommended packaging model for this project is a portable `onedir` build, not an installer.
+This project is meant to be packaged as a portable `onedir` build.
 
-That means the customer receives an extracted folder containing:
+That means:
 
-- `Lazy ADB Wizard.exe`
-- bundled Qt runtime files
-- `resources/`
-- `output/`
-- the runtime icon file
+- no installer
+- no `onefile`
+- just a folder with the `.exe` and the runtime files it needs
 
-The customer then opens the `.exe` directly.
+### Important Notes
 
-### Important Packaging Notes
-
-- Build the Windows package on Windows.
-- Do not try to create the Windows `.exe` from Linux or macOS.
-- Use `onedir`, not `onefile`, for this project.
-- Distribute the whole built folder as a zip, not just the `.exe`.
+- Build the Windows `.exe` on Windows.
+- Do not try to build the Windows `.exe` from Linux or macOS.
+- Use `onedir`, not `onefile`.
+- Zip the whole output folder, not just the `.exe`.
 
 ### Windows Build Steps
 
-Open a terminal in the repository root on Windows:
+In the repo root on Windows:
 
 ```powershell
 py -3 -m venv venv
@@ -346,102 +343,62 @@ pip install -r requirements.txt
 pip install pyinstaller
 ```
 
-Build the portable package:
+Run this exact command to build the portable `.exe` folder:
 
 ```powershell
 .\venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --windowed --onedir --name "Lazy ADB Wizard" --icon "lazy-adb-wizard.ico" --add-data "android-logo.ico;." --add-data "resources;resources" --add-data "output;output" main.py
 ```
 
-### What Each Important Flag Does
+### What The Important Flags Do
 
-- `--windowed`: prevents the app from opening as a console application
-- `--onedir`: creates a portable folder instead of a single self-extracting executable
-- `--icon "lazy-adb-wizard.ico"`: sets the Windows `.exe` icon
-- `--add-data "android-logo.ico;."`: bundles the runtime icon file used by PySide6 for the open window icon
-- `--add-data "resources;resources"`: bundles the application resources
-- `--add-data "output;output"`: includes the output folder structure
+- `--windowed`
+  - prevents a console window from opening with the app
+- `--onedir`
+  - creates a portable folder instead of one big self-extracting blob
+- `--add-data "resources;resources"`
+  - bundles the app resources
+- `--add-data "output;output"`
+  - keeps the expected output folder structure
 
-### Where The Result Appears
+### Result
 
-The build output appears under:
+The build appears here:
 
 ```text
 dist\Lazy ADB Wizard\
 ```
 
-For delivery, zip the whole folder:
+Zip that whole folder for delivery:
 
 ```powershell
 Compress-Archive -Path ".\dist\Lazy ADB Wizard\*" -DestinationPath ".\dist\Lazy-ADB-Wizard-Windows.zip" -Force
 ```
 
-The customer should:
+Then the other person:
 
-1. extract the zip
-2. open `Lazy ADB Wizard.exe`
+1. extracts the zip
+2. opens `Lazy ADB Wizard.exe`
 
-### Including Platform-Tools In Customer Builds
+### Include Platform-Tools Or Not
 
-You have two valid packaging models:
+You have two sane options:
 
-1. Include platform-tools inside `resources/platform-tools/windows/` before building.
-   This is best for direct customer delivery when you want the app to work without downloading ADB on first run.
-2. Leave platform-tools absent and let the first-run bootstrap download them automatically.
-   This is useful for repository or GitHub distributions where heavy binaries are intentionally excluded.
-
-## Converting A PNG Icon To ICO On Linux
-
-If you want to generate the Windows `.ico` from Linux and already have a PNG source image, use ImageMagick:
-
-```bash
-magick 3874546-middle.png -background none -define icon:auto-resize=256,128,64,48,32,16 lazy-adb-wizard.ico
-```
-
-On systems with the older command name:
-
-```bash
-convert 3874546-middle.png -background none -define icon:auto-resize=256,128,64,48,32,16 lazy-adb-wizard.ico
-```
-
-To verify the result:
-
-```bash
-file lazy-adb-wizard.ico
-```
+1. Put Windows platform-tools into `resources/platform-tools/windows/` before building.
+   Best when you want the app to work immediately with no first-run download.
+2. Leave platform-tools out and let the app download them on first run.
+   Best when you want the repo and package lighter.
 
 ## Troubleshooting
 
-### The App Starts But No Device Is Detected
+### No Device Is Detected
 
-- confirm the device is unlocked
-- confirm USB debugging or Wireless debugging is actually enabled
-- confirm the ADB authorization prompt was accepted
-- retry `Check Connection`
-- use `Open Guide` for the full setup steps
+- make sure the phone is unlocked
+- make sure USB or Wireless Debugging is actually enabled
+- accept the authorization prompt on the phone
+- click `Check Connection`
+- use `Open Guide` if the setup still fights back
 
-### The App Downloads Platform-Tools On Every Start
+### Platform-Tools Download Every Time
 
-- confirm the app has permission to write into its own `resources/platform-tools/<os>/` directory
-- confirm the expected ADB executable exists after download
-
-### The Packaged Windows App Opens Slowly
-
-- make sure you built with `--onedir`
-- run it from an extracted folder, not directly inside a zip
-- avoid running it from a network path
-- if necessary, test whether antivirus scanning of `adb.exe` is adding noticeable overhead
-
-### The Window Icon Shows On Linux But Not On Windows
-
-For Windows packaged builds, you need both:
-
-- `--icon "lazy-adb-wizard.ico"` for the `.exe`
-- `--add-data "android-logo.ico;."` so PySide6 can load the runtime window icon
-
-## Current Version
-
-Current project metadata in [pyproject.toml](/home/javier/repos/lazy-adb/pyproject.toml):
-
-- package name: `lazy-adb`
-- version: `0.1.0`
-
+- check that the app can write into `resources/platform-tools/<os>/`
+- check that the expected ADB executable really exists after download
