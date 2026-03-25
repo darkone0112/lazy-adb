@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+from pathlib import Path
+import sys
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.device_info import detect_getprop_problem, parse_getprop_output
 from core.device_state import (
     ConnectionMode,
     DeviceConnectionState,
     filter_devices_for_mode,
+    is_mdns_wireless_serial,
     is_wireless_serial,
     normalize_device_state,
     parse_adb_devices_output,
@@ -81,17 +86,18 @@ class DeviceStateParsingTests(unittest.TestCase):
     def test_wireless_helpers_identify_mdns_tls_serials(self) -> None:
         mdns_serial = "adb-R5CWC28JNYM._adb-tls-connect._tcp"
         devices = parse_adb_devices_output(
-            f"List of devices attached\nUSB123\tdevice\n{mdns_serial}\tdevice\n"
+            f"List of devices attached\nUSB123\tdevice\n192.168.1.22:40283\tdevice\n{mdns_serial}\tdevice\n"
         )
 
         self.assertTrue(is_wireless_serial(mdns_serial))
+        self.assertTrue(is_mdns_wireless_serial(mdns_serial))
         self.assertEqual(
             [device.serial for device in filter_devices_for_mode(devices, ConnectionMode.USB)],
             ["USB123"],
         )
         self.assertEqual(
             [device.serial for device in filter_devices_for_mode(devices, ConnectionMode.WIFI)],
-            [mdns_serial],
+            ["192.168.1.22:40283"],
         )
 
 
@@ -116,6 +122,18 @@ class DeviceInfoParsingTests(unittest.TestCase):
         self.assertEqual(info.device_name, "shiba")
         self.assertEqual(info.build_id, "AP1A.240305.019")
         self.assertEqual(info.serial_number, "ABC123")
+
+    def test_parse_getprop_output_prefers_device_serial_over_adb_endpoint(self) -> None:
+        output = "\n".join(
+            [
+                "[ro.product.model]: [Pixel 8]",
+                "[ro.serialno]: [R5CWC28JNYM]",
+            ]
+        )
+
+        info = parse_getprop_output(output, serial_number="192.168.1.22:40283")
+
+        self.assertEqual(info.serial_number, "R5CWC28JNYM")
 
     def test_detect_getprop_problem_for_missing_command(self) -> None:
         problem = detect_getprop_problem("/bin/sh: getprop: not found\n")

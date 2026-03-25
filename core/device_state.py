@@ -73,9 +73,16 @@ def is_wireless_serial(serial: str) -> bool:
     return bool(host and port.isdigit())
 
 
+def is_mdns_wireless_serial(serial: str) -> bool:
+    lowered = serial.lower()
+    return "._adb-tls-connect._tcp" in lowered or "._adb-tls-pairing._tcp" in lowered
+
+
 def filter_devices_for_mode(devices: list[ListedDevice], mode: ConnectionMode) -> list[ListedDevice]:
     if mode is ConnectionMode.WIFI:
-        return [device for device in devices if is_wireless_serial(device.serial)]
+        wireless_devices = [device for device in devices if is_wireless_serial(device.serial)]
+        concrete_endpoints = [device for device in wireless_devices if not is_mdns_wireless_serial(device.serial)]
+        return concrete_endpoints or wireless_devices
     return [device for device in devices if not is_wireless_serial(device.serial)]
 
 

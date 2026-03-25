@@ -54,7 +54,7 @@ def parse_getprop_output(output: str, serial_number: str | None = None) -> Devic
         model=value_for("ro.product.model"),
         manufacturer=value_for("ro.product.manufacturer"),
         android_version=value_for("ro.build.version.release"),
-        serial_number=serial_number or value_for("ro.serialno", "ro.boot.serialno"),
+        serial_number=value_for("ro.serialno", "ro.boot.serialno", default=serial_number or UNKNOWN_VALUE),
         build_id=value_for("ro.build.id"),
         fingerprint=value_for("ro.build.fingerprint"),
         device_name=value_for("ro.product.device", "ro.product.name"),

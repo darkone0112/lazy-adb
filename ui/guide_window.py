@@ -143,32 +143,41 @@ class GuideWindow(QMainWindow):
         )
         self.content_layout.addWidget(
             self._step_card(
-                "4. Pair In Android",
+                "4. Understand The Two Ports First",
                 [
-                    "Open Developer Options > Wireless debugging.",
-                    "Tap Pair device with pairing code.",
-                    "Keep the pairing dialog open on the phone.",
-                    "Note the IP address, pairing port, and pairing code shown there.",
+                    "Wireless debugging shows two different ports that are used for two different actions.",
+                    "The connect port is shown on the main Wireless debugging screen, next to the device IP address.",
+                    "The pairing port is only shown after tapping Pair device with pairing code.",
+                    "The pairing code is also only shown inside Pair device with pairing code, next to the same device IP address.",
+                    "The IP address stays the same, but the connect port and pairing port are different values.",
                 ],
             )
         )
         self.content_layout.addWidget(
             self._step_card(
-                "5. Pair In Lazy ADB Wizard",
+                "5. Fill The App In The Easiest Order",
                 [
                     "In Wi-Fi mode, enter the device IP in Host / IP.",
-                    "Enter the pairing port shown on the device.",
-                    "Enter the pairing code shown on the device.",
-                    "Click Pair Device.",
+                    "While you are already on the main Wireless debugging screen, enter the connect port first, because it is the first port Android shows next to the IP address.",
+                    "After that, tap Pair device with pairing code on the phone.",
+                    "Then enter the pairing port and the pairing code shown in that pairing screen.",
                 ],
             )
         )
         self.content_layout.addWidget(
             self._step_card(
-                "6. Connect The Wireless Session",
+                "6. Pair The Device",
                 [
-                    "Back on the device, note the connect port shown in Wireless debugging.",
-                    "Enter that value in Connect Port inside the app.",
+                    "With Host / IP, Pair Port, and Pairing Code filled in, click Pair Device in Lazy ADB Wizard.",
+                    "Wait for Android Debug Bridge to confirm that pairing succeeded.",
+                ],
+            )
+        )
+        self.content_layout.addWidget(
+            self._step_card(
+                "7. Connect The Wireless Session",
+                [
+                    "After pairing succeeds, use the same Host / IP and the connect port you filled in earlier.",
                     "Click Connect.",
                     "Once connected, the device should appear as ready in the app.",
                 ],
@@ -176,7 +185,7 @@ class GuideWindow(QMainWindow):
         )
         self.content_layout.addWidget(
             self._step_card(
-                "7. If Pairing Or Connect Fails",
+                "8. If Pairing Or Connect Fails",
                 [
                     "Make sure the phone and computer are on the same network.",
                     "Reopen Wireless debugging and get a fresh pairing code if the current one expired.",

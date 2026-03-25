@@ -4,6 +4,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -33,6 +34,7 @@ DEVICE_FIELD_NAMES = [
 class CentralPanel(QWidget):
     open_wireless_setup_requested = Signal()
     disconnect_requested = Signal(str)
+    device_selected = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -71,13 +73,38 @@ class CentralPanel(QWidget):
         self.wireless_disconnect_button.setEnabled(disconnect_enabled)
         self.wireless_target_badge.setVisible(has_device)
 
+    def set_wireless_device_choices(
+        self,
+        *,
+        choices: list[tuple[str, str]],
+        selected_serial: str | None,
+        enabled: bool,
+    ) -> None:
+        visible = len(choices) > 1
+        self.wireless_device_selector.setVisible(visible)
+        self.wireless_device_selector.blockSignals(True)
+        self.wireless_device_selector.clear()
+        for label, serial in choices:
+            self.wireless_device_selector.addItem(label, serial)
+        if visible and selected_serial:
+            index = self.wireless_device_selector.findData(selected_serial)
+            if index >= 0:
+                self.wireless_device_selector.setCurrentIndex(index)
+        self.wireless_device_selector.setEnabled(visible and enabled)
+        self.wireless_device_selector.blockSignals(False)
+
     def show_guidance(self, connection: DeviceConnection) -> None:
         title, message, next_step = describe_connection_state(connection, mode=self._mode)
         if self._mode is ConnectionMode.WIFI:
             self._wireless_connection = connection
             self.wireless_title.setText(title)
             self._set_wireless_target(connection.serial)
-            self.wireless_status_label.setText(f"{message} Next step: {next_step}")
+            if connection.state is DeviceConnectionState.NO_DEVICE:
+                self.wireless_status_label.setText(
+                    "No wireless device paired or connected yet. Use the button Open Guide to see next steps."
+                )
+            else:
+                self.wireless_status_label.setText(f"{message} Next step: {next_step}")
             self._set_field_map_defaults(self.wireless_device_fields)
             self.stack.setCurrentWidget(self.wireless_page)
             return
@@ -207,6 +234,11 @@ class CentralPanel(QWidget):
         self.wireless_target_badge.setObjectName("HeaderBadge")
         self.wireless_target_badge.hide()
 
+        self.wireless_device_selector = QComboBox()
+        self.wireless_device_selector.setMinimumWidth(220)
+        self.wireless_device_selector.setToolTip("Choose the active wireless device when multiple targets are connected.")
+        self.wireless_device_selector.hide()
+
         self.wireless_pair_new_button = QPushButton("Pair New Connection")
         self.wireless_disconnect_button = QPushButton("Disconnect")
         self.wireless_disconnect_button.hide()
@@ -217,6 +249,7 @@ class CentralPanel(QWidget):
         title_layout.setSpacing(10)
         title_layout.addWidget(self.wireless_title)
         title_layout.addStretch()
+        title_layout.addWidget(self.wireless_device_selector)
         title_layout.addWidget(self.wireless_target_badge)
         title_layout.addWidget(self.wireless_pair_new_button)
         title_layout.addWidget(self.wireless_disconnect_button)
@@ -240,6 +273,7 @@ class CentralPanel(QWidget):
 
         self.wireless_pair_new_button.clicked.connect(self.open_wireless_setup_requested.emit)
         self.wireless_disconnect_button.clicked.connect(self._emit_disconnect_request)
+        self.wireless_device_selector.currentIndexChanged.connect(self._emit_device_selected)
         self._set_field_map_defaults(self.wireless_device_fields)
 
         wrapper = QWidget()
@@ -362,3 +396,8 @@ class CentralPanel(QWidget):
 
     def _emit_disconnect_request(self) -> None:
         self.disconnect_requested.emit(self.current_wireless_endpoint())
+
+    def _emit_device_selected(self, index: int) -> None:
+        serial = self.wireless_device_selector.itemData(index)
+        if isinstance(serial, str) and serial:
+            self.device_selected.emit(serial)

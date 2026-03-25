@@ -12,6 +12,7 @@ class ActionBar(QWidget):
     stop_capture_requested = Signal()
     export_package_requested = Signal()
     open_guide_requested = Signal()
+    open_advanced_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -24,6 +25,7 @@ class ActionBar(QWidget):
         self.stop_capture_button = QPushButton("Stop Capture")
         self.export_package_button = QPushButton("Export Package")
         self.open_guide_button = QPushButton("Open Guide")
+        self.open_advanced_button = QPushButton("Advanced")
         self.device_selector_label.hide()
         self.device_selector.hide()
         self.device_selector.setMinimumWidth(220)
@@ -43,6 +45,7 @@ class ActionBar(QWidget):
         layout.addWidget(self.stop_capture_button)
         layout.addWidget(self.export_package_button)
         layout.addWidget(self.open_guide_button)
+        layout.addWidget(self.open_advanced_button)
         layout.addStretch()
 
         self.check_connection_button.clicked.connect(self.check_connection_requested.emit)
@@ -52,6 +55,7 @@ class ActionBar(QWidget):
         self.stop_capture_button.clicked.connect(self.stop_capture_requested.emit)
         self.export_package_button.clicked.connect(self.export_package_requested.emit)
         self.open_guide_button.clicked.connect(self.open_guide_requested.emit)
+        self.open_advanced_button.clicked.connect(self.open_advanced_requested.emit)
 
     def set_device_choices(
         self,
@@ -89,6 +93,7 @@ class ActionBar(QWidget):
         self.start_capture_button.setEnabled(ready_device and not capture_running)
         self.stop_capture_button.setEnabled(capture_running)
         self.export_package_button.setEnabled(export_ready and not capture_running)
+        self.open_advanced_button.setEnabled(ready_device and not capture_running)
 
     def _emit_selected_device(self, index: int) -> None:
         serial = self.device_selector.itemData(index)
