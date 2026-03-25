@@ -4,6 +4,20 @@ from pathlib import Path
 import sys
 
 
+def _find_app_icon() -> Path | None:
+    from utils.platform_paths import get_app_root
+
+    candidates = [
+        get_app_root() / "android-logo.ico",
+        Path(sys.executable).resolve().parent / "android-logo.ico",
+        Path(__file__).resolve().parent / "android-logo.ico",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def main() -> int:
     try:
         from PySide6.QtGui import QIcon
@@ -17,8 +31,8 @@ def main() -> int:
     from ui.main_window import MainWindow
 
     app = QApplication(sys.argv)
-    icon_path = Path(__file__).resolve().parent / "android-logo.ico"
-    if icon_path.exists():
+    icon_path = _find_app_icon()
+    if icon_path is not None:
         app_icon = QIcon(str(icon_path))
         app.setWindowIcon(app_icon)
     else:
