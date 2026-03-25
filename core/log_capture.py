@@ -137,7 +137,7 @@ class LogCaptureManager:
         self._active_log_handle = None
         self._active_session = None
 
-        if process.returncode not in (0, -15, 143):
+        if process.returncode is None:
             return CaptureStopResult(
                 success=False,
                 message="The capture process stopped unexpectedly.",

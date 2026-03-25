@@ -119,6 +119,27 @@ class SupportPackageExporterTests(unittest.TestCase):
 
             self.assertFalse(result.success)
 
+    def test_create_package_can_write_archive_to_selected_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            log_path = temp_dir / "logcat.txt"
+            log_path.write_text("example log line\n", encoding="utf-8")
+            destination = temp_dir / "chosen" / "customer-export.zip"
+
+            exporter = SupportPackageExporter(exports_root=temp_dir / "exports")
+            result = exporter.create_package(
+                connection=DeviceConnection(state=DeviceConnectionState.READY, serial="ABC123"),
+                device_info=None,
+                log_path=log_path,
+                adb_version_output="Android Debug Bridge version 1.0.41",
+                destination_path=destination,
+            )
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.archive_path, destination)
+            self.assertIsNone(result.export_dir)
+            self.assertTrue(destination.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

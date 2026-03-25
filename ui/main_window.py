@@ -6,14 +6,14 @@ import shlex
 
 from PySide6.QtCore import QObject, QSize, QThread, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QResizeEvent
-from PySide6.QtWidgets import QApplication, QBoxLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QBoxLayout, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from core.adb_manager import ADBManager, CommandResult, DeviceDiscovery, DeviceInfoResult
 from core.device_info import DeviceInfo
 from core.device_state import ConnectionMode, DeviceConnection, DeviceConnectionState, ListedDevice, filter_devices_for_mode
-from core.exporter import SupportPackageExporter
-from core.log_capture import LogCaptureManager
-from core.platform_tools_bootstrap import PlatformToolsBootstrapper
+from core.exporter import ExportResult, SupportPackageExporter
+from core.log_capture import CaptureStartResult, CaptureStopResult, LogCaptureManager
+from core.platform_tools_bootstrap import PlatformToolsBootstrapResult, PlatformToolsBootstrapper
 from ui.action_bar import ActionBar
 from ui.advanced_window import AdvancedWindow
 from ui.activity_panel import ActivityPanel
@@ -29,6 +29,21 @@ class RuntimeStateSnapshot:
     adb_result: CommandResult | None
     discovery: DeviceDiscovery
     device_info_result: DeviceInfoResult | None
+
+
+@dataclass(slots=True)
+class AsyncADBActionResult:
+    action: str
+    result: object
+    label: str
+    command_preview: str | None = None
+
+
+@dataclass(slots=True)
+class BackgroundTaskResult:
+    action: str
+    result: object
+    label: str
 
 
 class RuntimeStateWorker(QObject):
@@ -94,6 +109,137 @@ class RuntimeStateWorker(QObject):
             self.failed.emit(str(exc), self._log_changes, self._generation)
 
 
+class ADBActionWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(str, str)
+
+    def __init__(
+        self,
+        *,
+        action: str,
+        adb_path,
+        default_timeout: float,
+        serial: str | None = None,
+        host: str | None = None,
+        port: str | None = None,
+        pairing_code: str | None = None,
+        target: str | None = None,
+        args: list[str] | None = None,
+        command_preview: str | None = None,
+        label: str,
+    ) -> None:
+        super().__init__()
+        self._action = action
+        self._adb_path = adb_path
+        self._default_timeout = default_timeout
+        self._serial = serial
+        self._host = host
+        self._port = port
+        self._pairing_code = pairing_code
+        self._target = target
+        self._args = args or []
+        self._command_preview = command_preview
+        self._label = label
+
+    def run(self) -> None:
+        try:
+            manager = ADBManager(adb_path=self._adb_path, default_timeout=self._default_timeout)
+            match self._action:
+                case "pair":
+                    result = manager.pair_device(self._host or "", self._port or "", self._pairing_code or "")
+                case "connect":
+                    result = manager.connect_device(self._host or "", self._port or "")
+                case "disconnect":
+                    result = manager.disconnect_device(self._target)
+                case "device_info":
+                    result = manager.read_device_info(self._serial or "")
+                case "advanced":
+                    result = manager.run(self._args, serial=self._serial, timeout=30.0)
+                case _:
+                    raise ValueError(f"Unsupported background ADB action: {self._action}")
+            self.finished.emit(
+                AsyncADBActionResult(
+                    action=self._action,
+                    result=result,
+                    label=self._label,
+                    command_preview=self._command_preview,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive UI worker guard
+            self.failed.emit(self._action, str(exc))
+
+
+class BackgroundTaskWorker(QObject):
+    progress = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str, str)
+
+    def __init__(
+        self,
+        *,
+        action: str,
+        label: str,
+        bootstrapper: PlatformToolsBootstrapper | None = None,
+        capture_manager: LogCaptureManager | None = None,
+        exporter: SupportPackageExporter | None = None,
+        serial: str | None = None,
+        connection: DeviceConnection | None = None,
+        device_info: DeviceInfo | None = None,
+        log_path: Path | None = None,
+        adb_version_output: str | None = None,
+        destination_path: Path | None = None,
+    ) -> None:
+        super().__init__()
+        self._action = action
+        self._label = label
+        self._bootstrapper = bootstrapper
+        self._capture_manager = capture_manager
+        self._exporter = exporter
+        self._serial = serial
+        self._connection = connection
+        self._device_info = device_info
+        self._log_path = log_path
+        self._adb_version_output = adb_version_output
+        self._destination_path = destination_path
+
+    def run(self) -> None:
+        try:
+            match self._action:
+                case "bootstrap":
+                    if self._bootstrapper is None:
+                        raise ValueError("Missing platform-tools bootstrapper.")
+                    result = self._bootstrapper.ensure_present(progress_cb=self.progress.emit)
+                case "start_capture":
+                    if self._capture_manager is None or self._serial is None:
+                        raise ValueError("Missing capture manager or serial.")
+                    result = self._capture_manager.start_capture(self._serial)
+                case "stop_capture":
+                    if self._capture_manager is None:
+                        raise ValueError("Missing capture manager.")
+                    result = self._capture_manager.stop_capture()
+                case "export":
+                    if self._exporter is None or self._connection is None:
+                        raise ValueError("Missing exporter context.")
+                    result = self._exporter.create_package(
+                        connection=self._connection,
+                        device_info=self._device_info,
+                        log_path=self._log_path,
+                        adb_version_output=self._adb_version_output,
+                        destination_path=self._destination_path,
+                    )
+                case _:
+                    raise ValueError(f"Unsupported background task: {self._action}")
+            self.finished.emit(
+                BackgroundTaskResult(
+                    action=self._action,
+                    result=result,
+                    label=self._label,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive UI worker guard
+            self.failed.emit(self._action, str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -121,6 +267,13 @@ class MainWindow(QMainWindow):
         self._status_refresh_in_progress = False
         self._queued_refresh: tuple[bool, bool] | None = None
         self._refresh_generation = 0
+        self._action_thread: QThread | None = None
+        self._action_worker: ADBActionWorker | None = None
+        self._command_in_progress = False
+        self._background_task_thread: QThread | None = None
+        self._background_task_worker: BackgroundTaskWorker | None = None
+        self._background_task_in_progress = False
+        self._pending_connection_feedback = False
 
         self.setWindowTitle("Lazy ADB Wizard")
 
@@ -472,30 +625,20 @@ class MainWindow(QMainWindow):
     def on_check_connection(self) -> None:
         if not self._ensure_platform_tools_available(log_changes=True, allow_retry=True):
             return
+        self._pending_connection_feedback = True
         self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
-        if self.current_connection.state is not DeviceConnectionState.READY:
-            self._show_feedback_popup(
-                title="Connection Status",
-                message=self._friendly_state_summary(self.current_connection),
-                tone="warn",
-            )
 
     def on_refresh_device_info(self) -> None:
         if self.current_connection.state is not DeviceConnectionState.READY or not self.current_connection.serial:
             self._set_activity_summary("No ready device is selected yet.", "warn", popup=True, popup_title="Refresh Device Info")
             self.activity_panel.append_message("Check the connection first so the application can choose a device.")
             return
-
-        self._apply_device_info_result(
-            self.adb_manager.read_device_info(self.current_connection.serial),
-            announce_success=True,
+        self.activity_panel.append_message(f"Refreshing device information for {self.current_connection.serial}.")
+        self._start_adb_action(
+            action="device_info",
+            label="Refresh Device Info",
+            serial=self.current_connection.serial,
         )
-        self.status_panel.set_connection_status(
-            "Connected" if self.current_connection.state is DeviceConnectionState.READY else "Disconnected",
-            tone=self._connection_tone(self.current_connection),
-            tooltip=self._friendly_state_summary(self.current_connection),
-        )
-        self._sync_advanced_target()
 
     def on_device_selected(self, serial: str) -> None:
         if serial == self._preferred_device_serial:
@@ -537,7 +680,7 @@ class MainWindow(QMainWindow):
         self.advanced_window.activateWindow()
 
     def on_connection_mode_selected(self, mode: ConnectionMode) -> None:
-        if self.capture_manager.active_session is not None or mode is self.connection_mode:
+        if self.capture_manager.active_session is not None or self._is_busy() or mode is self.connection_mode:
             self._sync_mode_buttons()
             return
 
@@ -585,13 +728,13 @@ class MainWindow(QMainWindow):
             return
 
         self.activity_panel.append_message(f"Pairing with {host}:{port}.")
-        result = self.adb_manager.pair_device(host, port, pairing_code)
-        self.activity_panel.append_message(self._describe_command_feedback(result))
-        if result.success:
-            self._set_activity_summary("Wireless pairing succeeded. Connect using the device's debug port.", "ready")
-        else:
-            self._set_activity_summary("Wireless pairing failed.", "error")
-            self._show_feedback_popup(title="Wireless Pairing", message=result.describe(), tone="error")
+        self._start_adb_action(
+            action="pair",
+            label="Wireless Pairing",
+            host=host,
+            port=port,
+            pairing_code=pairing_code,
+        )
 
     def on_connect_wireless(self, host: str, port: str) -> None:
         if self.connection_mode is not ConnectionMode.WIFI:
@@ -607,16 +750,12 @@ class MainWindow(QMainWindow):
 
         endpoint = f"{host}:{port}"
         self.activity_panel.append_message(f"Connecting to {endpoint}.")
-        result = self.adb_manager.connect_device(host, port)
-        self.activity_panel.append_message(self._describe_command_feedback(result))
-        if not result.success:
-            self._set_activity_summary("Wireless connection failed.", "error")
-            self._show_feedback_popup(title="Wireless Connect", message=result.describe(), tone="error")
-            return
-
-        self._preferred_device_serial = endpoint
-        self._set_activity_summary("Wireless connection succeeded.", "ready")
-        self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
+        self._start_adb_action(
+            action="connect",
+            label="Wireless Connect",
+            host=host,
+            port=port,
+        )
 
     def on_disconnect_wireless(self, target: str) -> None:
         if self.connection_mode is not ConnectionMode.WIFI:
@@ -635,16 +774,11 @@ class MainWindow(QMainWindow):
             return
 
         self.activity_panel.append_message(f"Disconnecting {endpoint}.")
-        result = self.adb_manager.disconnect_device(endpoint)
-        self.activity_panel.append_message(self._describe_command_feedback(result))
-        if result.success:
-            if self._preferred_device_serial == endpoint:
-                self._preferred_device_serial = None
-            self._set_activity_summary("Wireless device disconnected.", "warn", popup=True, popup_title="Wireless Disconnect")
-        else:
-            self._set_activity_summary("Wireless disconnect failed.", "error")
-            self._show_feedback_popup(title="Wireless Disconnect", message=result.describe(), tone="error")
-        self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
+        self._start_adb_action(
+            action="disconnect",
+            label="Wireless Disconnect",
+            target=endpoint,
+        )
 
     def on_run_advanced_command(self, command_text: str) -> None:
         if self.current_connection.state is not DeviceConnectionState.READY or not self.current_connection.serial:
@@ -668,107 +802,70 @@ class MainWindow(QMainWindow):
             self._set_activity_summary("No ADB subcommand was provided.", "warn", popup=True, popup_title="Advanced")
             return
 
-        result = self.adb_manager.run(args, serial=self.current_connection.serial, timeout=30.0)
         command_preview = " ".join(args)
-        output_parts: list[str] = [f"$ adb -s {self.current_connection.serial} {command_preview}"]
-        if result.stdout.strip():
-            output_parts.append(result.stdout.rstrip())
-        if result.stderr.strip():
-            output_parts.append(result.stderr.rstrip())
-        if not result.stdout.strip() and not result.stderr.strip():
-            output_parts.append(result.describe())
-        output_text = "\n".join(output_parts)
-
-        if self.advanced_window is not None:
-            self.advanced_window.append_output(output_text)
-        self.activity_panel.append_message(f"Advanced command executed: {command_preview}")
-        if not result.success:
-            self._set_activity_summary("The Advanced command failed.", "error")
-            self._show_feedback_popup(title="Advanced", message=result.describe(), tone="error")
+        self._start_adb_action(
+            action="advanced",
+            label="Advanced",
+            serial=self.current_connection.serial,
+            args=args,
+            command_preview=command_preview,
+        )
 
     def on_start_capture(self) -> None:
         if self.current_connection.state is not DeviceConnectionState.READY or not self.current_connection.serial:
             self._set_activity_summary("No ready device is available for capture.", "warn", popup=True, popup_title="Start Capture")
             self.activity_panel.append_message("Connect and authorize a device before starting logcat capture.")
             return
-
-        result = self.capture_manager.start_capture(self.current_connection.serial)
-        if not result.success or result.session is None:
-            self._set_activity_summary("Log capture could not be started.", "error")
-            self.activity_panel.append_message(result.message)
-            self._show_feedback_popup(title="Start Capture", message=result.message, tone="error")
-            return
-
-        self.central_panel.show_capture_state(
-            result.session.serial,
-            str(result.session.log_path),
-            "Logcat is being written live to disk. Reproduce the issue, then stop the capture.",
+        self.activity_panel.append_message(f"Starting log capture for {self.current_connection.serial}.")
+        self._start_background_task(
+            action="start_capture",
+            label="Start Capture",
+            serial=self.current_connection.serial,
         )
-        self._set_activity_summary("Log capture is running.", "ready")
-        self.activity_panel.append_message(result.message)
-        self.latest_log_path = result.session.log_path
-        self._capture_log_offset = 0
-        self._capture_partial_line = ""
-        self.capture_tail_timer.start()
-        self.status_panel.set_capture_status(f"Capturing to {result.session.log_path.name}", tone="ready")
-        self._sync_action_state()
 
     def on_stop_capture(self) -> None:
-        result = self.capture_manager.stop_capture()
-        self._flush_capture_log(final=True)
-        self.capture_tail_timer.stop()
-        if not result.success:
-            self._set_activity_summary("Log capture could not be stopped cleanly.", "error")
-            self.activity_panel.append_message(result.message)
-            if result.stderr.strip():
-                self.activity_panel.append_message(result.stderr.strip())
-            self._show_feedback_popup(title="Stop Capture", message=result.message, tone="error")
-            self.status_panel.set_capture_status("Capture stopped with issues", tone="error")
-            self._sync_action_state()
-            return
-
-        self.activity_panel.clear_feed()
-        self.latest_log_path = result.log_path or self.latest_log_path
-        if self.current_device_info is not None:
-            self.central_panel.show_device_info(self.current_device_info)
-        elif self.current_connection.serial:
-            self.central_panel.show_ready_without_info(
-                self.current_connection.serial,
-                "Capture finished. Refresh device information if you want the latest details in the export package.",
-            )
-        else:
-            self.central_panel.show_guidance(self.current_connection)
-
-        self._set_activity_summary("Log capture stopped and the file is ready for export.", "warn", popup=True, popup_title="Capture Complete")
-        self.activity_panel.append_message(result.message)
-        if result.stderr.strip():
-            self.activity_panel.append_message(result.stderr.strip())
-        self.status_panel.set_capture_status("Idle", tone="warn")
-        self._sync_action_state()
+        self.activity_panel.append_message("Stopping log capture.")
+        self._start_background_task(
+            action="stop_capture",
+            label="Stop Capture",
+        )
 
     def on_export_package(self) -> None:
-        result = self.exporter.create_package(
+        suggested_serial = (
+            self.current_device_info.serial_number
+            if self.current_device_info is not None and self.current_device_info.serial_number
+            else (self.current_connection.serial or "device")
+        )
+        suggested_name = f"lazy-adb-support-{suggested_serial}.zip".replace(":", "_")
+        destination, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Support Package",
+            str(Path.home() / suggested_name),
+            "Zip Archives (*.zip)",
+        )
+        if not destination:
+            return
+        self.activity_panel.append_message(f"Creating support package at {destination}.")
+        self._start_background_task(
+            action="export",
+            label="Export Package",
             connection=self.current_connection,
             device_info=self.current_device_info,
             log_path=self.latest_log_path,
             adb_version_output=self.latest_adb_version_output,
+            destination_path=Path(destination),
         )
-        if result.success:
-            self._set_activity_summary("Support package created successfully.", "ready")
-            self.activity_panel.append_message(result.message)
-        else:
-            self._set_activity_summary("Support package could not be created.", "error")
-            self.activity_panel.append_message(result.message)
-            self._show_feedback_popup(title="Export Package", message=result.message, tone="error")
-        self._sync_action_state()
 
     def on_poll_status(self) -> None:
+        if self._is_busy():
+            return
         self._refresh_runtime_state(log_changes=False, force_device_refresh=False)
 
     def _startup_refresh(self) -> None:
-        self._ensure_platform_tools_available(log_changes=True, allow_retry=True)
-        self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
-        self.status_timer.start()
+        if self._ensure_platform_tools_available(log_changes=True, allow_retry=True):
+            self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
+        if not self.status_timer.isActive():
+            self.status_timer.start()
 
     def _ensure_platform_tools_available(self, *, log_changes: bool, allow_retry: bool) -> bool:
         if self.platform_tools_bootstrapper.is_installed():
@@ -792,6 +889,9 @@ class MainWindow(QMainWindow):
             )
             return False
 
+        if self._background_task_in_progress:
+            return False
+
         self._set_activity_summary("Bundled platform-tools are missing. Downloading the package for this system.", "warn")
         self.central_panel.set_wireless_action_state(
             has_device=False,
@@ -807,57 +907,26 @@ class MainWindow(QMainWindow):
 
         if log_changes:
             self.activity_panel.append_message("Bundled platform-tools are not present. Starting first-run download.")
-
-        QApplication.processEvents()
-        result = self.platform_tools_bootstrapper.ensure_present(progress_cb=self._on_platform_tools_progress)
-        QApplication.processEvents()
-
-        if result.success:
-            self._platform_tools_bootstrap_failed = False
-            if result.downloaded:
-                self.activity_panel.append_message(result.message)
-            self._set_activity_summary("Platform-tools are ready.", "ready")
-            self.central_panel.set_wireless_action_state(
-                has_device=bool(self._available_devices),
-                pairing_enabled=self.capture_manager.active_session is None,
-                disconnect_enabled=self.capture_manager.active_session is None and self.current_connection.serial is not None,
-            )
-            self.status_panel.set_adb_status(
-                "Active",
-                tone="ready",
-                tooltip="Bundled platform-tools are installed.",
-            )
-            return True
-
-        self._platform_tools_bootstrap_failed = True
-        self._available_devices = []
-        self._preferred_device_serial = None
-        self._adb_version_checked = False
-        self._set_device_choices(choices=[], selected_serial=None, enabled=False)
-        self.central_panel.set_wireless_action_state(
-            has_device=False,
-            pairing_enabled=False,
-            disconnect_enabled=False,
+        self._start_background_task(
+            action="bootstrap",
+            label="Platform-Tools Download",
         )
-        self.current_connection = DeviceConnection(
-            state=DeviceConnectionState.ERROR,
-            detail=result.message,
-        )
-        self._set_activity_summary("Platform-tools download failed. Retry after restoring network access.", "error")
-        self.activity_panel.append_message(result.message)
-        self._show_feedback_popup(title="Platform-Tools Download", message=result.message, tone="error")
-        self.status_panel.set_adb_status("Inactive", tone="error", tooltip="Platform-tools download failed.")
-        self.status_panel.set_connection_status(
-            "Disconnected",
-            tone="error",
-            tooltip="ADB is unavailable until platform-tools are installed.",
-        )
-        self.central_panel.show_guidance(self.current_connection)
         return False
 
     def _refresh_runtime_state(self, *, log_changes: bool, force_device_refresh: bool) -> None:
         if not self._ensure_platform_tools_available(log_changes=log_changes, allow_retry=False):
             self._sync_action_state()
+            return
+
+        if self._is_busy():
+            if self._queued_refresh is None:
+                self._queued_refresh = (log_changes, force_device_refresh)
+            else:
+                queued_log_changes, queued_force_refresh = self._queued_refresh
+                self._queued_refresh = (
+                    queued_log_changes or log_changes,
+                    queued_force_refresh or force_device_refresh,
+                )
             return
 
         if self._status_refresh_in_progress:
@@ -956,6 +1025,13 @@ class MainWindow(QMainWindow):
                 self.central_panel.show_guidance(self.current_connection)
             if log_changes:
                 self._set_activity_summary("ADB is unavailable, so device detection could not continue.", "error")
+            if self._pending_connection_feedback:
+                self._show_feedback_popup(
+                    title="Connection Status",
+                    message=self._friendly_state_summary(self.current_connection),
+                    tone="warn",
+                )
+                self._pending_connection_feedback = False
             self._complete_runtime_state_refresh()
             return
 
@@ -1014,6 +1090,7 @@ class MainWindow(QMainWindow):
             elif self.capture_manager.active_session is None and self.current_device_info is not None:
                 self.central_panel.show_device_info(self.current_device_info)
             self._set_activity_summary("Device detection is active and up to date.", "ready")
+            self._pending_connection_feedback = False
         else:
             self.current_device_info = None
             if self.capture_manager.active_session is None:
@@ -1032,6 +1109,13 @@ class MainWindow(QMainWindow):
                     self._friendly_state_summary(self.current_connection),
                     self._connection_tone(self.current_connection),
                 )
+            if self._pending_connection_feedback:
+                self._show_feedback_popup(
+                    title="Connection Status",
+                    message=self._friendly_state_summary(self.current_connection),
+                    tone="warn",
+                )
+                self._pending_connection_feedback = False
 
         self._complete_runtime_state_refresh()
 
@@ -1051,7 +1135,321 @@ class MainWindow(QMainWindow):
         if log_changes:
             self._set_activity_summary("Background device refresh failed.", "error")
             self.activity_panel.append_message(message)
+        if self._pending_connection_feedback:
+            self._show_feedback_popup(title="Connection Status", message=message, tone="warn")
+            self._pending_connection_feedback = False
         self._complete_runtime_state_refresh()
+
+    def _start_background_task(
+        self,
+        *,
+        action: str,
+        label: str,
+        serial: str | None = None,
+        connection: DeviceConnection | None = None,
+        device_info: DeviceInfo | None = None,
+        log_path: Path | None = None,
+        adb_version_output: str | None = None,
+        destination_path: Path | None = None,
+    ) -> None:
+        if self._background_task_in_progress:
+            self._set_activity_summary(f"{label} is already running.", "warn", popup=True, popup_title=label)
+            return
+        self._background_task_in_progress = True
+        worker = BackgroundTaskWorker(
+            action=action,
+            label=label,
+            bootstrapper=self.platform_tools_bootstrapper if action == "bootstrap" else None,
+            capture_manager=self.capture_manager if action in {"start_capture", "stop_capture"} else None,
+            exporter=self.exporter if action == "export" else None,
+            serial=serial,
+            connection=connection,
+            device_info=device_info,
+            log_path=log_path,
+            adb_version_output=adb_version_output,
+            destination_path=destination_path,
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_background_task_progress)
+        worker.finished.connect(self._on_background_task_finished)
+        worker.failed.connect(self._on_background_task_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(thread.quit)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_background_task_worker)
+        self._background_task_worker = worker
+        self._background_task_thread = thread
+        self._sync_action_state()
+        thread.start()
+
+    def _on_background_task_progress(self, message: str) -> None:
+        self.activity_panel.append_message(message)
+
+    def _on_background_task_finished(self, outcome: BackgroundTaskResult) -> None:
+        self._background_task_in_progress = False
+        match outcome.action:
+            case "bootstrap":
+                result = outcome.result
+                self._handle_bootstrap_result(result)
+            case "start_capture":
+                result = outcome.result
+                self._handle_start_capture_result(result)
+            case "stop_capture":
+                result = outcome.result
+                self._handle_stop_capture_result(result)
+            case "export":
+                result = outcome.result
+                self._handle_export_result(result)
+            case _:
+                self.activity_panel.append_message(f"Completed background task: {outcome.label}.")
+        self._sync_action_state()
+        self._drain_queued_refresh_if_idle()
+
+    def _on_background_task_failed(self, action: str, message: str) -> None:
+        self._background_task_in_progress = False
+        self._set_activity_summary(f"{action.replace('_', ' ').title()} failed.", "error")
+        self.activity_panel.append_message(message)
+        self._show_feedback_popup(title="Background Task", message=message, tone="error")
+        self._sync_action_state()
+        self._drain_queued_refresh_if_idle()
+
+    def _clear_background_task_worker(self) -> None:
+        self._background_task_thread = None
+        self._background_task_worker = None
+
+    def _start_adb_action(
+        self,
+        *,
+        action: str,
+        label: str,
+        serial: str | None = None,
+        host: str | None = None,
+        port: str | None = None,
+        pairing_code: str | None = None,
+        target: str | None = None,
+        args: list[str] | None = None,
+        command_preview: str | None = None,
+    ) -> None:
+        if self._command_in_progress:
+            self._set_activity_summary(f"{label} is already running.", "warn", popup=True, popup_title=label)
+            return
+        self._command_in_progress = True
+        worker = ADBActionWorker(
+            action=action,
+            adb_path=self.adb_manager.adb_path,
+            default_timeout=self.adb_manager.default_timeout,
+            serial=serial,
+            host=host,
+            port=port,
+            pairing_code=pairing_code,
+            target=target,
+            args=args,
+            command_preview=command_preview,
+            label=label,
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_adb_action_finished)
+        worker.failed.connect(self._on_adb_action_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(thread.quit)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_adb_action_worker)
+        self._action_worker = worker
+        self._action_thread = thread
+        self._sync_action_state()
+        thread.start()
+
+    def _handle_bootstrap_result(self, result: PlatformToolsBootstrapResult) -> None:
+        if result.success:
+            self._platform_tools_bootstrap_failed = False
+            if result.downloaded:
+                self.activity_panel.append_message(result.message)
+            self._set_activity_summary("Platform-tools are ready.", "ready")
+            self.central_panel.set_wireless_action_state(
+                has_device=bool(self._available_devices),
+                pairing_enabled=self.capture_manager.active_session is None,
+                disconnect_enabled=self.capture_manager.active_session is None and self.current_connection.serial is not None,
+            )
+            self.status_panel.set_adb_status(
+                "Active",
+                tone="ready",
+                tooltip="Bundled platform-tools are installed.",
+            )
+            self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
+            if not self.status_timer.isActive():
+                self.status_timer.start()
+            return
+
+        self._platform_tools_bootstrap_failed = True
+        self._available_devices = []
+        self._preferred_device_serial = None
+        self._adb_version_checked = False
+        self._set_device_choices(choices=[], selected_serial=None, enabled=False)
+        self.central_panel.set_wireless_action_state(
+            has_device=False,
+            pairing_enabled=False,
+            disconnect_enabled=False,
+        )
+        self.current_connection = DeviceConnection(
+            state=DeviceConnectionState.ERROR,
+            detail=result.message,
+        )
+        self._set_activity_summary("Platform-tools download failed. Retry after restoring network access.", "error")
+        self.activity_panel.append_message(result.message)
+        self._show_feedback_popup(title="Platform-Tools Download", message=result.message, tone="error")
+        self.status_panel.set_adb_status("Inactive", tone="error", tooltip="Platform-tools download failed.")
+        self.status_panel.set_connection_status(
+            "Disconnected",
+            tone="error",
+            tooltip="ADB is unavailable until platform-tools are installed.",
+        )
+        self.central_panel.show_guidance(self.current_connection)
+        if self._pending_connection_feedback:
+            self._show_feedback_popup(title="Connection Status", message=result.message, tone="warn")
+            self._pending_connection_feedback = False
+
+    def _handle_start_capture_result(self, result: CaptureStartResult) -> None:
+        if not result.success or result.session is None:
+            self._set_activity_summary("Log capture could not be started.", "error")
+            self.activity_panel.append_message(result.message)
+            self._show_feedback_popup(title="Start Capture", message=result.message, tone="error")
+            return
+
+        self.central_panel.show_capture_state(
+            self.current_device_info.serial_number if self.current_device_info is not None else result.session.serial,
+            str(result.session.log_path),
+            "Logcat is being written live to disk. Reproduce the issue, then stop the capture.",
+        )
+        self._set_activity_summary("Log capture is running.", "ready")
+        self.activity_panel.append_message(result.message)
+        self.latest_log_path = result.session.log_path
+        self._capture_log_offset = 0
+        self._capture_partial_line = ""
+        self.capture_tail_timer.start()
+        self.status_panel.set_capture_status(f"Capturing to {result.session.log_path.name}", tone="ready")
+
+    def _handle_stop_capture_result(self, result: CaptureStopResult) -> None:
+        self._flush_capture_log(final=True)
+        self.capture_tail_timer.stop()
+        if not result.success:
+            self._set_activity_summary("Log capture could not be stopped cleanly.", "error")
+            self.activity_panel.append_message(result.message)
+            if result.stderr.strip():
+                self.activity_panel.append_message(result.stderr.strip())
+            self._show_feedback_popup(title="Stop Capture", message=result.message, tone="error")
+            self.status_panel.set_capture_status("Capture stopped with issues", tone="error")
+            return
+
+        self.activity_panel.clear_feed()
+        self.latest_log_path = result.log_path or self.latest_log_path
+        if self.current_device_info is not None:
+            self.central_panel.show_device_info(self.current_device_info)
+        elif self.current_connection.serial:
+            self.central_panel.show_ready_without_info(
+                self.current_connection.serial,
+                "Capture finished. Refresh device information if you want the latest details in the export package.",
+            )
+        else:
+            self.central_panel.show_guidance(self.current_connection)
+
+        self._set_activity_summary("Log capture stopped and the file is ready for export.", "warn", popup=True, popup_title="Capture Complete")
+        self.activity_panel.append_message(result.message)
+        if result.stderr.strip():
+            self.activity_panel.append_message(result.stderr.strip())
+        self.status_panel.set_capture_status("Idle", tone="warn")
+
+    def _handle_export_result(self, result: ExportResult) -> None:
+        if result.success:
+            self._set_activity_summary("Support package created successfully.", "ready")
+            self.activity_panel.append_message(result.message)
+            return
+        self._set_activity_summary("Support package could not be created.", "error")
+        self.activity_panel.append_message(result.message)
+        self._show_feedback_popup(title="Export Package", message=result.message, tone="error")
+
+    def _on_adb_action_finished(self, outcome: AsyncADBActionResult) -> None:
+        self._command_in_progress = False
+        match outcome.action:
+            case "pair":
+                result = outcome.result
+                self.activity_panel.append_message(self._describe_command_feedback(result))
+                if result.success:
+                    self._set_activity_summary("Wireless pairing succeeded. Connect using the device's debug port.", "ready")
+                else:
+                    self._set_activity_summary("Wireless pairing failed.", "error")
+                    self._show_feedback_popup(title=outcome.label, message=result.describe(), tone="error")
+            case "connect":
+                result = outcome.result
+                self.activity_panel.append_message(self._describe_command_feedback(result))
+                if not result.success:
+                    self._set_activity_summary("Wireless connection failed.", "error")
+                    self._show_feedback_popup(title=outcome.label, message=result.describe(), tone="error")
+                else:
+                    first_target = result.command[-1] if result.command else None
+                    if first_target:
+                        self._preferred_device_serial = first_target
+                    self._set_activity_summary("Wireless connection succeeded.", "ready")
+                    self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
+            case "disconnect":
+                result = outcome.result
+                self.activity_panel.append_message(self._describe_command_feedback(result))
+                if result.success:
+                    self._preferred_device_serial = None
+                    self._set_activity_summary("Wireless device disconnected.", "warn", popup=True, popup_title=outcome.label)
+                else:
+                    self._set_activity_summary("Wireless disconnect failed.", "error")
+                    self._show_feedback_popup(title=outcome.label, message=result.describe(), tone="error")
+                self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
+            case "device_info":
+                result = outcome.result
+                self._apply_device_info_result(result, announce_success=True)
+                self.status_panel.set_connection_status(
+                    "Connected" if self.current_connection.state is DeviceConnectionState.READY else "Disconnected",
+                    tone=self._connection_tone(self.current_connection),
+                    tooltip=self._friendly_state_summary(self.current_connection),
+                )
+                self._sync_advanced_target()
+            case "advanced":
+                result = outcome.result
+                command_preview = outcome.command_preview or ""
+                output_parts: list[str] = [f"$ adb -s {self.current_connection.serial} {command_preview}"]
+                if result.stdout.strip():
+                    output_parts.append(result.stdout.rstrip())
+                if result.stderr.strip():
+                    output_parts.append(result.stderr.rstrip())
+                if not result.stdout.strip() and not result.stderr.strip():
+                    output_parts.append(result.describe())
+                output_text = "\n".join(output_parts)
+                if self.advanced_window is not None:
+                    self.advanced_window.append_output(output_text)
+                self.activity_panel.append_message(f"Advanced command executed: {command_preview}")
+                if not result.success:
+                    self._set_activity_summary("The Advanced command failed.", "error")
+                    self._show_feedback_popup(title=outcome.label, message=result.describe(), tone="error")
+            case _:
+                self.activity_panel.append_message(f"Completed background action: {outcome.label}.")
+        self._sync_action_state()
+        self._drain_queued_refresh_if_idle()
+
+    def _on_adb_action_failed(self, action: str, message: str) -> None:
+        self._command_in_progress = False
+        self._set_activity_summary(f"{action.replace('_', ' ').title()} failed.", "error")
+        self.activity_panel.append_message(message)
+        self._show_feedback_popup(title="ADB Action", message=message, tone="error")
+        self._sync_action_state()
+        self._drain_queued_refresh_if_idle()
+
+    def _clear_adb_action_worker(self) -> None:
+        self._action_thread = None
+        self._action_worker = None
 
     def _clear_runtime_state_worker(self) -> None:
         self._status_refresh_thread = None
@@ -1060,6 +1458,11 @@ class MainWindow(QMainWindow):
     def _complete_runtime_state_refresh(self) -> None:
         self._status_refresh_in_progress = False
         self._sync_action_state()
+        self._drain_queued_refresh_if_idle()
+
+    def _drain_queued_refresh_if_idle(self) -> None:
+        if self._queued_refresh is None or self._status_refresh_in_progress or self._is_busy():
+            return
         if self._queued_refresh is None:
             return
         log_changes, force_device_refresh = self._queued_refresh
@@ -1150,7 +1553,6 @@ class MainWindow(QMainWindow):
 
     def _on_platform_tools_progress(self, message: str) -> None:
         self.activity_panel.append_message(message)
-        QApplication.processEvents()
 
     def _describe_adb_status(self, result) -> str:
         if result.success:
@@ -1219,13 +1621,14 @@ class MainWindow(QMainWindow):
             self._capture_partial_line = ""
 
     def _sync_action_state(self) -> None:
-        ready_device = self.current_connection.state is DeviceConnectionState.READY
+        busy = self._is_busy()
+        ready_device = self.current_connection.state is DeviceConnectionState.READY and not busy
         capture_running = self.capture_manager.active_session is not None
         export_ready = self.current_device_info is not None or self.latest_log_path is not None
-        self.usb_mode_button.setEnabled(not capture_running)
-        self.wifi_mode_button.setEnabled(not capture_running)
+        self.usb_mode_button.setEnabled(not capture_running and not busy)
+        self.wifi_mode_button.setEnabled(not capture_running and not busy)
         self._sync_mode_buttons()
-        wireless_ready = not capture_running and not self._platform_tools_bootstrap_failed
+        wireless_ready = not capture_running and not self._platform_tools_bootstrap_failed and not busy
         self.central_panel.set_wireless_action_state(
             has_device=self.connection_mode is ConnectionMode.WIFI and bool(self._available_devices),
             pairing_enabled=self.connection_mode is ConnectionMode.WIFI and wireless_ready,
@@ -1241,13 +1644,13 @@ class MainWindow(QMainWindow):
         self._set_device_choices(
             choices=[(self._format_device_choice(device), device.serial) for device in self._available_devices],
             selected_serial=self._preferred_device_serial,
-            enabled=not capture_running,
+            enabled=not capture_running and not busy,
         )
         self.action_bar.set_capture_controls(
             ready_device=ready_device,
             capture_running=capture_running,
             export_ready=export_ready,
-            device_selection_enabled=not capture_running,
+            device_selection_enabled=not capture_running and not busy,
         )
 
     def _format_device_choice(self, device: ListedDevice) -> str:
@@ -1261,14 +1664,21 @@ class MainWindow(QMainWindow):
     def _sync_advanced_target(self) -> None:
         if self.advanced_window is None:
             return
-        if self.current_connection.state is DeviceConnectionState.READY and self.current_connection.serial:
+        if (
+            self.current_connection.state is DeviceConnectionState.READY
+            and self.current_connection.serial
+            and not self._is_busy()
+        ):
             hardware_serial = self.current_device_info.serial_number if self.current_device_info is not None else "Pending refresh"
             self.advanced_window.set_target(
                 f"Target: {hardware_serial} via {self.current_connection.serial}",
                 True,
             )
             return
-        self.advanced_window.set_target("Target: No ready device selected.", False)
+        self.advanced_window.set_target(
+            "Target: Background task in progress." if self._is_busy() else "Target: No ready device selected.",
+            False,
+        )
 
     def _describe_command_feedback(self, result) -> str:
         if result.success:
@@ -1284,6 +1694,9 @@ class MainWindow(QMainWindow):
         self.wifi_mode_button.setChecked(self.connection_mode is ConnectionMode.WIFI)
         self.usb_mode_button.blockSignals(False)
         self.wifi_mode_button.blockSignals(False)
+
+    def _is_busy(self) -> bool:
+        return self._command_in_progress or self._background_task_in_progress
 
     def _update_content_layout_mode(self) -> None:
         available_height = max(0, self.height() - 220)
