@@ -396,6 +396,10 @@ class MainWindow(QMainWindow):
                 background: #0d1117;
                 color: #c9d1d9;
             }
+            QDialog#ExportPickerWindow, QWidget#ExportPickerRoot {
+                background: #0d1117;
+                color: #c9d1d9;
+            }
             QMainWindow#GuideWindow, QScrollArea#GuideScroll, QWidget#GuideContainer {
                 background: #0d1117;
                 color: #c9d1d9;
@@ -593,19 +597,22 @@ class MainWindow(QMainWindow):
                 border-radius: 10px;
                 padding: 8px 10px;
             }
-            QListWidget {
+            QListWidget, QListWidget#ExportLogList {
                 background: #0f1620;
                 color: #e6edf3;
                 border: 1px solid #30363d;
                 border-radius: 12px;
                 padding: 6px;
             }
-            QListWidget::item {
+            QListWidget::item, QListWidget#ExportLogList::item {
                 padding: 10px 12px;
                 border-radius: 8px;
                 margin: 2px 0px;
             }
-            QListWidget::item:selected {
+            QListWidget#ExportLogList::item {
+                min-height: 48px;
+            }
+            QListWidget::item:selected, QListWidget#ExportLogList::item:selected {
                 background: #1f6feb;
                 color: #f0f6fc;
             }
