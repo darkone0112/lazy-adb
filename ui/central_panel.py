@@ -71,7 +71,6 @@ class CentralPanel(QWidget):
         self.wireless_pair_new_button.setEnabled(pairing_enabled)
         self.wireless_disconnect_button.setVisible(has_device)
         self.wireless_disconnect_button.setEnabled(disconnect_enabled)
-        self.wireless_target_badge.setVisible(has_device)
 
     def set_wireless_device_choices(
         self,
@@ -80,7 +79,7 @@ class CentralPanel(QWidget):
         selected_serial: str | None,
         enabled: bool,
     ) -> None:
-        visible = len(choices) > 1
+        visible = bool(choices) or selected_serial is not None
         self.wireless_device_selector.setVisible(visible)
         self.wireless_device_selector.blockSignals(True)
         self.wireless_device_selector.clear()
@@ -90,7 +89,11 @@ class CentralPanel(QWidget):
             index = self.wireless_device_selector.findData(selected_serial)
             if index >= 0:
                 self.wireless_device_selector.setCurrentIndex(index)
-        self.wireless_device_selector.setEnabled(visible and enabled)
+            elif self.wireless_device_selector.count() == 0:
+                self.wireless_device_selector.addItem(selected_serial, selected_serial)
+        elif visible and self.wireless_device_selector.count() == 0:
+            self.wireless_device_selector.addItem("No Device Selected", "")
+        self.wireless_device_selector.setEnabled(visible and enabled and self.wireless_device_selector.count() > 1)
         self.wireless_device_selector.blockSignals(False)
 
     def show_guidance(self, connection: DeviceConnection) -> None:
@@ -98,7 +101,6 @@ class CentralPanel(QWidget):
         if self._mode is ConnectionMode.WIFI:
             self._wireless_connection = connection
             self.wireless_title.setText(title)
-            self._set_wireless_target(connection.serial)
             if connection.state is DeviceConnectionState.NO_DEVICE:
                 self.wireless_status_label.setText(
                     "No wireless device paired or connected yet. Use the button Open Guide to see next steps."
@@ -123,7 +125,6 @@ class CentralPanel(QWidget):
                 serial=info.serial_number,
             )
             self.wireless_title.setText("Wireless ADB Setup")
-            self._set_wireless_target(info.serial_number)
             self.wireless_status_label.setText(f"Wireless target connected and ready: {info.serial_number}")
             self.stack.setCurrentWidget(self.wireless_page)
             return
@@ -140,7 +141,6 @@ class CentralPanel(QWidget):
                 serial=serial,
             )
             self.wireless_title.setText("Wireless ADB Setup")
-            self._set_wireless_target(serial)
             self.wireless_status_label.setText(message)
             self.stack.setCurrentWidget(self.wireless_page)
             return
@@ -230,12 +230,8 @@ class CentralPanel(QWidget):
         self.wireless_title = QLabel("Wireless ADB Setup")
         self.wireless_title.setObjectName("PanelTitle")
 
-        self.wireless_target_badge = QLabel("No Device")
-        self.wireless_target_badge.setObjectName("HeaderBadge")
-        self.wireless_target_badge.hide()
-
         self.wireless_device_selector = QComboBox()
-        self.wireless_device_selector.setMinimumWidth(220)
+        self.wireless_device_selector.setMinimumWidth(260)
         self.wireless_device_selector.setToolTip("Choose the active wireless device when multiple targets are connected.")
         self.wireless_device_selector.hide()
 
@@ -250,7 +246,6 @@ class CentralPanel(QWidget):
         title_layout.addWidget(self.wireless_title)
         title_layout.addStretch()
         title_layout.addWidget(self.wireless_device_selector)
-        title_layout.addWidget(self.wireless_target_badge)
         title_layout.addWidget(self.wireless_pair_new_button)
         title_layout.addWidget(self.wireless_disconnect_button)
 
@@ -372,12 +367,6 @@ class CentralPanel(QWidget):
 
     def _set_field(self, field_map: dict[str, QLabel], field_name: str, value: str) -> None:
         field_map[field_name].setText(value)
-
-    def _set_wireless_target(self, serial: str | None) -> None:
-        if serial:
-            self.wireless_target_badge.setText(serial)
-        else:
-            self.wireless_target_badge.setText("No Device")
 
     def _copy_label(self, label: QLabel) -> None:
         QApplication.clipboard().setText(label.text())

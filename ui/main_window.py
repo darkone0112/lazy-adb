@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 import shlex
+import sys
 
-from PySide6.QtCore import QObject, QSize, QThread, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QResizeEvent
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QCloseEvent, QMouseEvent, QResizeEvent
 from PySide6.QtWidgets import QApplication, QBoxLayout, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from core.adb_manager import ADBManager, CommandResult, DeviceDiscovery, DeviceInfoResult
@@ -21,6 +23,7 @@ from ui.central_panel import CentralPanel
 from ui.guide_window import GuideWindow
 from ui.status_panel import StatusPanel
 from ui.wireless_setup_window import WirelessSetupWindow
+from utils.file_helpers import get_captures_root
 from utils.platform_paths import describe_host_system
 
 
@@ -44,6 +47,32 @@ class BackgroundTaskResult:
     action: str
     result: object
     label: str
+
+
+class DebugTitleLabel(QLabel):
+    debug_toggle_requested = Signal()
+
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._click_count = 0
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(650)
+        self._click_timer.timeout.connect(self._reset_clicks)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._click_count += 1
+            if self._click_count >= 3:
+                self._reset_clicks()
+                self.debug_toggle_requested.emit()
+            else:
+                self._click_timer.start()
+        super().mousePressEvent(event)
+
+    def _reset_clicks(self) -> None:
+        self._click_count = 0
+        self._click_timer.stop()
 
 
 class RuntimeStateWorker(QObject):
@@ -274,6 +303,9 @@ class MainWindow(QMainWindow):
         self._background_task_worker: BackgroundTaskWorker | None = None
         self._background_task_in_progress = False
         self._pending_connection_feedback = False
+        self._debug_log_enabled = False
+        self._debug_logger: logging.Logger | None = None
+        self._debug_log_handler: logging.Handler | None = None
 
         self.setWindowTitle("Lazy ADB Wizard")
 
@@ -305,8 +337,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._startup_refresh)
 
     def _build_layout(self) -> None:
-        title = QLabel("Lazy ADB Wizard")
-        title.setObjectName("HeaderTitle")
+        self.title_label = DebugTitleLabel("Lazy ADB Wizard")
+        self.title_label.setObjectName("HeaderTitle")
 
         mode_toggle = QWidget()
         mode_layout = QHBoxLayout(mode_toggle)
@@ -324,7 +356,7 @@ class MainWindow(QMainWindow):
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(16)
-        header_layout.addWidget(title)
+        header_layout.addWidget(self.title_label)
         header_layout.addStretch()
         self.status_panel.setMinimumWidth(520)
         self.status_panel.setMaximumWidth(900)
@@ -550,6 +582,13 @@ class MainWindow(QMainWindow):
             QLineEdit:focus, QComboBox:focus {
                 border-color: #58a6ff;
             }
+            QComboBox QAbstractItemView {
+                background: #0f1620;
+                color: #f0f6fc;
+                border: 1px solid #30363d;
+                selection-background-color: #1f6feb;
+                selection-color: #f0f6fc;
+            }
             QComboBox::drop-down {
                 border: none;
                 width: 18px;
@@ -619,10 +658,12 @@ class MainWindow(QMainWindow):
         self.central_panel.open_wireless_setup_requested.connect(self.on_open_wireless_setup)
         self.central_panel.disconnect_requested.connect(self.on_disconnect_wireless)
         self.central_panel.device_selected.connect(self.on_device_selected)
+        self.title_label.debug_toggle_requested.connect(self.on_toggle_debug_logging_requested)
         self.status_timer.timeout.connect(self.on_poll_status)
         self.capture_tail_timer.timeout.connect(self._poll_capture_log)
 
     def on_check_connection(self) -> None:
+        self._debug_log("Manual connection check requested.")
         if not self._ensure_platform_tools_available(log_changes=True, allow_retry=True):
             return
         self._pending_connection_feedback = True
@@ -644,6 +685,7 @@ class MainWindow(QMainWindow):
         if serial == self._preferred_device_serial:
             return
 
+        self._debug_log(f"Device selection changed to {serial}.")
         self._preferred_device_serial = serial
         self.activity_panel.append_message(f"Switched active target to {serial}.")
         self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
@@ -654,6 +696,16 @@ class MainWindow(QMainWindow):
             self.guide_window = GuideWindow(self)
             self.guide_window.setStyleSheet(self.styleSheet())
         self.guide_window.show_for_mode(self.connection_mode)
+
+    def on_toggle_debug_logging_requested(self) -> None:
+        if self._debug_log_enabled:
+            return
+        self._enable_debug_logging()
+        self._show_feedback_popup(
+            title="Debug Logging",
+            message="Application debug logging is active for this session.",
+            tone="warn",
+        )
 
     def on_open_wireless_setup(self) -> None:
         self._wireless_setup_auto_opened = True
@@ -684,6 +736,7 @@ class MainWindow(QMainWindow):
             self._sync_mode_buttons()
             return
 
+        self._debug_log(f"Switching connection mode to {mode.value}.")
         self.connection_mode = mode
         self._refresh_generation += 1
         self._wireless_setup_auto_opened = False
@@ -727,6 +780,7 @@ class MainWindow(QMainWindow):
         if not self._ensure_platform_tools_available(log_changes=True, allow_retry=True):
             return
 
+        self._debug_log(f"Starting wireless pairing for {host}:{port}.")
         self.activity_panel.append_message(f"Pairing with {host}:{port}.")
         self._start_adb_action(
             action="pair",
@@ -749,6 +803,7 @@ class MainWindow(QMainWindow):
             return
 
         endpoint = f"{host}:{port}"
+        self._debug_log(f"Starting wireless connect for {endpoint}.")
         self.activity_panel.append_message(f"Connecting to {endpoint}.")
         self._start_adb_action(
             action="connect",
@@ -773,6 +828,7 @@ class MainWindow(QMainWindow):
         if not self._ensure_platform_tools_available(log_changes=True, allow_retry=True):
             return
 
+        self._debug_log(f"Starting wireless disconnect for {endpoint}.")
         self.activity_panel.append_message(f"Disconnecting {endpoint}.")
         self._start_adb_action(
             action="disconnect",
@@ -803,6 +859,7 @@ class MainWindow(QMainWindow):
             return
 
         command_preview = " ".join(args)
+        self._debug_log(f"Starting advanced command: {command_preview}")
         self._start_adb_action(
             action="advanced",
             label="Advanced",
@@ -816,6 +873,7 @@ class MainWindow(QMainWindow):
             self._set_activity_summary("No ready device is available for capture.", "warn", popup=True, popup_title="Start Capture")
             self.activity_panel.append_message("Connect and authorize a device before starting logcat capture.")
             return
+        self._debug_log(f"Starting capture for {self.current_connection.serial}.")
         self.activity_panel.append_message(f"Starting log capture for {self.current_connection.serial}.")
         self._start_background_task(
             action="start_capture",
@@ -824,6 +882,7 @@ class MainWindow(QMainWindow):
         )
 
     def on_stop_capture(self) -> None:
+        self._debug_log("Stopping capture.")
         self.activity_panel.append_message("Stopping log capture.")
         self._start_background_task(
             action="stop_capture",
@@ -831,6 +890,22 @@ class MainWindow(QMainWindow):
         )
 
     def on_export_package(self) -> None:
+        selected_log_path: Path | None = None
+        available_capture_root = get_captures_root()
+        if available_capture_root.exists() and any(available_capture_root.rglob("*.txt")):
+            initial_path = self.latest_log_path if self.latest_log_path is not None and self.latest_log_path.exists() else available_capture_root
+            selected_log, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Log Capture to Export",
+                str(initial_path),
+                "Log Files (*.txt);;All Files (*)",
+            )
+            if not selected_log:
+                return
+            selected_log_path = Path(selected_log)
+        elif self.latest_log_path is not None and self.latest_log_path.exists():
+            selected_log_path = self.latest_log_path
+
         suggested_serial = (
             self.current_device_info.serial_number
             if self.current_device_info is not None and self.current_device_info.serial_number
@@ -845,13 +920,14 @@ class MainWindow(QMainWindow):
         )
         if not destination:
             return
+        self._debug_log(f"Starting export package flow to {destination}.")
         self.activity_panel.append_message(f"Creating support package at {destination}.")
         self._start_background_task(
             action="export",
             label="Export Package",
             connection=self.current_connection,
             device_info=self.current_device_info,
-            log_path=self.latest_log_path,
+            log_path=selected_log_path,
             adb_version_output=self.latest_adb_version_output,
             destination_path=Path(destination),
         )
@@ -940,9 +1016,14 @@ class MainWindow(QMainWindow):
                 )
             return
 
+        self._debug_log(
+            f"Scheduling runtime refresh (mode={self.connection_mode.value}, force_device_refresh={force_device_refresh}, "
+            f"log_changes={log_changes})."
+        )
         self._start_runtime_state_worker(log_changes=log_changes, force_device_refresh=force_device_refresh)
 
     def _start_runtime_state_worker(self, *, log_changes: bool, force_device_refresh: bool) -> None:
+        self._debug_log("Runtime refresh worker started.")
         self._status_refresh_in_progress = True
         worker = RuntimeStateWorker(
             adb_path=self.adb_manager.adb_path,
@@ -975,6 +1056,10 @@ class MainWindow(QMainWindow):
         if generation != self._refresh_generation:
             self._complete_runtime_state_refresh()
             return
+        self._debug_log(
+            f"Runtime refresh completed with state={snapshot.discovery.connection.state.value}, "
+            f"serial={snapshot.discovery.connection.serial}."
+        )
         adb_result = snapshot.adb_result
         if adb_result is not None:
             adb_status = self._describe_adb_status(adb_result)
@@ -1123,6 +1208,7 @@ class MainWindow(QMainWindow):
         if generation != self._refresh_generation:
             self._complete_runtime_state_refresh()
             return
+        self._debug_log(f"Runtime refresh failed: {message}")
         self._adb_version_checked = False
         self.current_connection = DeviceConnection(
             state=DeviceConnectionState.ERROR,
@@ -1155,6 +1241,7 @@ class MainWindow(QMainWindow):
         if self._background_task_in_progress:
             self._set_activity_summary(f"{label} is already running.", "warn", popup=True, popup_title=label)
             return
+        self._debug_log(f"Background task started: {action}")
         self._background_task_in_progress = True
         worker = BackgroundTaskWorker(
             action=action,
@@ -1190,6 +1277,7 @@ class MainWindow(QMainWindow):
         self.activity_panel.append_message(message)
 
     def _on_background_task_finished(self, outcome: BackgroundTaskResult) -> None:
+        self._debug_log(f"Background task finished: {outcome.action}")
         self._background_task_in_progress = False
         match outcome.action:
             case "bootstrap":
@@ -1210,6 +1298,7 @@ class MainWindow(QMainWindow):
         self._drain_queued_refresh_if_idle()
 
     def _on_background_task_failed(self, action: str, message: str) -> None:
+        self._debug_log(f"Background task failed: {action} -> {message}")
         self._background_task_in_progress = False
         self._set_activity_summary(f"{action.replace('_', ' ').title()} failed.", "error")
         self.activity_panel.append_message(message)
@@ -1237,6 +1326,7 @@ class MainWindow(QMainWindow):
         if self._command_in_progress:
             self._set_activity_summary(f"{label} is already running.", "warn", popup=True, popup_title=label)
             return
+        self._debug_log(f"ADB action started: {action}")
         self._command_in_progress = True
         worker = ADBActionWorker(
             action=action,
@@ -1360,11 +1450,12 @@ class MainWindow(QMainWindow):
         else:
             self.central_panel.show_guidance(self.current_connection)
 
-        self._set_activity_summary("Log capture stopped and the file is ready for export.", "warn", popup=True, popup_title="Capture Complete")
+        self._set_activity_summary("Log capture stopped and the file is ready for export.", "warn")
         self.activity_panel.append_message(result.message)
         if result.stderr.strip():
             self.activity_panel.append_message(result.stderr.strip())
         self.status_panel.set_capture_status("Idle", tone="warn")
+        self._show_capture_complete_popup()
 
     def _handle_export_result(self, result: ExportResult) -> None:
         if result.success:
@@ -1376,6 +1467,7 @@ class MainWindow(QMainWindow):
         self._show_feedback_popup(title="Export Package", message=result.message, tone="error")
 
     def _on_adb_action_finished(self, outcome: AsyncADBActionResult) -> None:
+        self._debug_log(f"ADB action finished: {outcome.action}")
         self._command_in_progress = False
         match outcome.action:
             case "pair":
@@ -1440,6 +1532,7 @@ class MainWindow(QMainWindow):
         self._drain_queued_refresh_if_idle()
 
     def _on_adb_action_failed(self, action: str, message: str) -> None:
+        self._debug_log(f"ADB action failed: {action} -> {message}")
         self._command_in_progress = False
         self._set_activity_summary(f"{action.replace('_', ' ').title()} failed.", "error")
         self.activity_panel.append_message(message)
@@ -1577,10 +1670,70 @@ class MainWindow(QMainWindow):
             )
 
     def _show_feedback_popup(self, *, title: str, message: str, tone: str) -> None:
-        if tone == "error":
-            QMessageBox.critical(self, title, message)
-        else:
-            QMessageBox.warning(self, title, message)
+        dialog = self._build_message_box(title=title, message=message, tone=tone)
+        dialog.addButton(QMessageBox.StandardButton.Ok)
+        dialog.exec()
+
+    def _show_capture_complete_popup(self) -> None:
+        dialog = self._build_message_box(
+            title="Capture Complete",
+            message="Log capture stopped and the file is ready for export.",
+            tone="warn",
+        )
+        export_button = dialog.addButton("Export", QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton(QMessageBox.StandardButton.Ok)
+        dialog.exec()
+        if dialog.clickedButton() is export_button:
+            self.on_export_package()
+
+    def _build_message_box(self, *, title: str, message: str, tone: str) -> QMessageBox:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(title)
+        dialog.setText(message)
+        dialog.setIcon(QMessageBox.Icon.Critical if tone == "error" else QMessageBox.Icon.Warning)
+        dialog.setStyleSheet(
+            self.styleSheet()
+            + """
+            QMessageBox {
+                background: #161b22;
+            }
+            QMessageBox QLabel {
+                color: #e6edf3;
+                min-width: 320px;
+            }
+            """
+        )
+        return dialog
+
+    def _enable_debug_logging(self) -> None:
+        log_root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
+        log_path = log_root / "lazy-adb-debug.log"
+        logger = logging.getLogger("lazy_adb_debug")
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        logger.handlers.clear()
+        logger.addHandler(handler)
+        self._debug_logger = logger
+        self._debug_log_handler = handler
+        self._debug_log_enabled = True
+        self._debug_log(f"Debug logging enabled at {log_path}.")
+
+    def _disable_debug_logging(self) -> None:
+        if not self._debug_log_enabled:
+            return
+        self._debug_log("Debug logging disabled.")
+        if self._debug_logger is not None and self._debug_log_handler is not None:
+            self._debug_logger.removeHandler(self._debug_log_handler)
+            self._debug_log_handler.close()
+        self._debug_logger = None
+        self._debug_log_handler = None
+        self._debug_log_enabled = False
+
+    def _debug_log(self, message: str) -> None:
+        if self._debug_log_enabled and self._debug_logger is not None:
+            self._debug_logger.info(message)
 
     def _apply_window_sizing(self) -> None:
         target_size = self.sizeHint().expandedTo(QSize(1380, 940))
@@ -1748,4 +1901,5 @@ class MainWindow(QMainWindow):
             result = self.capture_manager.stop_capture()
             self.latest_log_path = result.log_path or self.latest_log_path
         self._flush_capture_log(final=True)
+        self._disable_debug_logging()
         super().closeEvent(event)
