@@ -234,8 +234,8 @@ class CentralPanel(QWidget):
         self.wireless_device_selector.setToolTip("Choose the active wireless device when multiple targets are connected.")
         self.wireless_device_selector.hide()
 
-        self.wireless_pair_new_button = QPushButton("Pair New Connection")
-        self.wireless_disconnect_button = QPushButton("Disconnect")
+        self.wireless_pair_new_button = QPushButton("Connect Device")
+        self.wireless_disconnect_button = QPushButton("Disconnect / Forget")
         self.wireless_disconnect_button.hide()
 
         title_row = QWidget()

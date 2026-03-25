@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 
 
 class WirelessSetupWindow(QMainWindow):
-    pair_requested = Signal(str, str, str)
+    pair_and_connect_requested = Signal(str, str, str, str)
     connect_requested = Signal(str, str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -27,14 +27,14 @@ class WirelessSetupWindow(QMainWindow):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
 
-        title = QLabel("Pair or Connect a Wireless Device")
+        title = QLabel("Connect a Wireless Device")
         title.setObjectName("PanelTitle")
 
-        description = QLabel(
-            "Use Pair Device for a new wireless session, then Connect with the debug port shown on the phone."
+        self.description = QLabel(
+            "Use Connect Device for a new wireless session, or leave the pairing fields empty to reconnect a device that is already paired on the phone."
         )
-        description.setObjectName("PanelSubtitle")
-        description.setWordWrap(True)
+        self.description.setObjectName("PanelSubtitle")
+        self.description.setWordWrap(True)
 
         grid = QWidget()
         grid_layout = QGridLayout(grid)
@@ -66,17 +66,14 @@ class WirelessSetupWindow(QMainWindow):
         button_layout = QHBoxLayout(button_row)
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(10)
-        self.pair_button = QPushButton("Pair Device")
-        self.connect_button = QPushButton("Connect")
-        button_layout.addWidget(self.pair_button)
-        button_layout.addWidget(self.connect_button)
+        self.pair_and_connect_button = QPushButton("Connect Device")
+        button_layout.addWidget(self.pair_and_connect_button)
         button_layout.addStretch()
 
-        self.pair_button.clicked.connect(self._emit_pair)
-        self.connect_button.clicked.connect(self._emit_connect)
+        self.pair_and_connect_button.clicked.connect(self._emit_pair_and_connect)
 
         layout.addWidget(title)
-        layout.addWidget(description)
+        layout.addWidget(self.description)
         layout.addWidget(grid)
         layout.addWidget(button_row)
         self.setCentralWidget(root)
@@ -86,21 +83,22 @@ class WirelessSetupWindow(QMainWindow):
         self.pair_port_input.setEnabled(enabled)
         self.pairing_code_input.setEnabled(enabled)
         self.connect_port_input.setEnabled(enabled)
-        self.pair_button.setEnabled(enabled)
-        self.connect_button.setEnabled(enabled)
+        self.pair_and_connect_button.setEnabled(enabled)
 
-    def _emit_pair(self) -> None:
-        self.pair_requested.emit(
-            self.host_input.text().strip(),
-            self.pair_port_input.text().strip(),
-            self.pairing_code_input.text().strip(),
-        )
-
-    def _emit_connect(self) -> None:
-        self.connect_requested.emit(
-            self.host_input.text().strip(),
-            self.connect_port_input.text().strip(),
-        )
+    def _emit_pair_and_connect(self) -> None:
+        host = self.host_input.text().strip()
+        pair_port = self.pair_port_input.text().strip()
+        pairing_code = self.pairing_code_input.text().strip()
+        connect_port = self.connect_port_input.text().strip()
+        if pair_port or pairing_code:
+            self.pair_and_connect_requested.emit(
+                host,
+                pair_port,
+                pairing_code,
+                connect_port,
+            )
+            return
+        self.connect_requested.emit(host, connect_port)
 
     def _label(self, text: str) -> QLabel:
         label = QLabel(text)

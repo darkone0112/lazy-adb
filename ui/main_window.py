@@ -6,7 +6,7 @@ from pathlib import Path
 import shlex
 import sys
 
-from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QMouseEvent, QResizeEvent
 from PySide6.QtWidgets import QApplication, QBoxLayout, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
@@ -76,8 +76,8 @@ class DebugTitleLabel(QLabel):
         self._click_timer.stop()
 
 
-class RuntimeStateWorker(QObject):
-    finished = Signal(object, bool, int)
+class RuntimeStateWorker(QThread):
+    result_ready = Signal(object, bool, int)
     failed = Signal(str, bool, int)
 
     def __init__(
@@ -126,7 +126,7 @@ class RuntimeStateWorker(QObject):
             device_info_result = None
             if should_fetch_info and discovery.connection.serial is not None:
                 device_info_result = manager.read_device_info(discovery.connection.serial)
-            self.finished.emit(
+            self.result_ready.emit(
                 RuntimeStateSnapshot(
                     adb_result=adb_result,
                     discovery=discovery,
@@ -139,8 +139,8 @@ class RuntimeStateWorker(QObject):
             self.failed.emit(str(exc), self._log_changes, self._generation)
 
 
-class ADBActionWorker(QObject):
-    finished = Signal(object)
+class ADBActionWorker(QThread):
+    result_ready = Signal(object)
     failed = Signal(str, str)
 
     def __init__(
@@ -187,7 +187,7 @@ class ADBActionWorker(QObject):
                     result = manager.run(self._args, serial=self._serial, timeout=30.0)
                 case _:
                     raise ValueError(f"Unsupported background ADB action: {self._action}")
-            self.finished.emit(
+            self.result_ready.emit(
                 AsyncADBActionResult(
                     action=self._action,
                     result=result,
@@ -199,9 +199,9 @@ class ADBActionWorker(QObject):
             self.failed.emit(self._action, str(exc))
 
 
-class BackgroundTaskWorker(QObject):
+class BackgroundTaskWorker(QThread):
     progress = Signal(str)
-    finished = Signal(object)
+    result_ready = Signal(object)
     failed = Signal(str, str)
 
     def __init__(
@@ -259,7 +259,7 @@ class BackgroundTaskWorker(QObject):
                     )
                 case _:
                     raise ValueError(f"Unsupported background task: {self._action}")
-            self.finished.emit(
+            self.result_ready.emit(
                 BackgroundTaskResult(
                     action=self._action,
                     result=result,
@@ -291,6 +291,8 @@ class MainWindow(QMainWindow):
         self._capture_partial_line = ""
         self._platform_tools_bootstrap_failed = False
         self._wireless_setup_auto_opened = False
+        self._wireless_no_device_poll_count = 0
+        self._suspend_wireless_auto_open = False
         self._adb_version_checked = False
         self._status_refresh_thread: QThread | None = None
         self._status_refresh_worker: RuntimeStateWorker | None = None
@@ -315,6 +317,7 @@ class MainWindow(QMainWindow):
         self._last_wireless_action_state: tuple[bool, bool, bool] | None = None
         self._last_wireless_setup_enabled: bool | None = None
         self._last_advanced_target_state: tuple[str, bool] | None = None
+        self._pending_wireless_connect: tuple[str, str] | None = None
 
         self.setWindowTitle("Lazy ADB Wizard")
 
@@ -749,7 +752,7 @@ class MainWindow(QMainWindow):
         if self.wireless_setup_window is None:
             self.wireless_setup_window = WirelessSetupWindow(self)
             self.wireless_setup_window.setStyleSheet(self.styleSheet())
-            self.wireless_setup_window.pair_requested.connect(self.on_pair_wireless)
+            self.wireless_setup_window.pair_and_connect_requested.connect(self.on_pair_and_connect_wireless)
             self.wireless_setup_window.connect_requested.connect(self.on_connect_wireless)
         self._set_wireless_setup_controls_enabled(
             not self._platform_tools_bootstrap_failed and self.capture_manager.active_session is None
@@ -777,6 +780,9 @@ class MainWindow(QMainWindow):
         self.connection_mode = mode
         self._refresh_generation += 1
         self._wireless_setup_auto_opened = False
+        self._wireless_no_device_poll_count = 0
+        self._suspend_wireless_auto_open = False
+        self._pending_wireless_connect = None
         self._preferred_device_serial = None
         self._available_devices = []
         self.current_device_info = None
@@ -786,7 +792,7 @@ class MainWindow(QMainWindow):
         self.central_panel.set_mode(mode)
         self._show_guidance(self.current_connection)
         self._set_activity_summary(
-            "Wireless ADB mode is active. Pair or connect a device from the main panel."
+            "Wireless ADB mode is active. Use Connect Device from the main panel."
             if mode is ConnectionMode.WIFI
             else "USB ADB mode is active. Connect a device by cable or check the current connection."
             ,
@@ -802,8 +808,10 @@ class MainWindow(QMainWindow):
 
     def on_pair_wireless(self, host: str, port: str, pairing_code: str) -> None:
         if self.connection_mode is not ConnectionMode.WIFI:
+            self._pending_wireless_connect = None
             return
         if not host or not port or not pairing_code:
+            self._pending_wireless_connect = None
             self._set_activity_summary(
                 "Wireless pairing needs host, pairing port, and pairing code.",
                 "warn",
@@ -812,9 +820,11 @@ class MainWindow(QMainWindow):
             )
             return
         if not port.isdigit():
+            self._pending_wireless_connect = None
             self._set_activity_summary("The pairing port must be numeric.", "warn", popup=True, popup_title="Wireless Pairing")
             return
         if not self._ensure_platform_tools_available(log_changes=True, allow_retry=True):
+            self._pending_wireless_connect = None
             return
 
         self._debug_log(f"Starting wireless pairing for {host}:{port}.")
@@ -827,9 +837,41 @@ class MainWindow(QMainWindow):
             pairing_code=pairing_code,
         )
 
+    def on_pair_and_connect_wireless(
+        self,
+        host: str,
+        pair_port: str,
+        pairing_code: str,
+        connect_port: str,
+    ) -> None:
+        if self.connection_mode is not ConnectionMode.WIFI:
+            return
+        if not host or not pair_port or not pairing_code or not connect_port:
+            self._set_activity_summary(
+                "Connect Device needs host, pairing port, pairing code, and connect port.",
+                "warn",
+                popup=True,
+                popup_title="Connect Device",
+            )
+            return
+        if not pair_port.isdigit():
+            self._set_activity_summary("The pairing port must be numeric.", "warn", popup=True, popup_title="Connect Device")
+            return
+        if not connect_port.isdigit():
+            self._set_activity_summary("The connect port must be numeric.", "warn", popup=True, popup_title="Connect Device")
+            return
+        self._pending_wireless_connect = (host, connect_port)
+        self._debug_log(f"Queued Connect Device for {host} (pair={pair_port}, connect={connect_port}).")
+        self.activity_panel.append_message(
+            f"Pairing and connecting to {host}. Pair port: {pair_port}. Connect port: {connect_port}."
+        )
+        self.on_pair_wireless(host, pair_port, pairing_code)
+
     def on_connect_wireless(self, host: str, port: str) -> None:
         if self.connection_mode is not ConnectionMode.WIFI:
             return
+        if self._pending_wireless_connect == (host, port):
+            self._pending_wireless_connect = None
         if not host or not port:
             self._set_activity_summary("Wireless connect needs a host and connect port.", "warn", popup=True, popup_title="Wireless Connect")
             return
@@ -852,6 +894,7 @@ class MainWindow(QMainWindow):
     def on_disconnect_wireless(self, target: str) -> None:
         if self.connection_mode is not ConnectionMode.WIFI:
             return
+        self._pending_wireless_connect = None
 
         endpoint = target.strip() or (self.current_connection.serial or "")
         if not endpoint:
@@ -866,10 +909,10 @@ class MainWindow(QMainWindow):
             return
 
         self._debug_log(f"Starting wireless disconnect for {endpoint}.")
-        self.activity_panel.append_message(f"Disconnecting {endpoint}.")
+        self.activity_panel.append_message(f"Disconnecting and forgetting guidance for {endpoint}.")
         self._start_adb_action(
             action="disconnect",
-            label="Wireless Disconnect",
+            label="Disconnect / Forget Wireless Device",
             target=endpoint,
         )
 
@@ -1042,20 +1085,13 @@ class MainWindow(QMainWindow):
             log_changes=log_changes,
             generation=self._refresh_generation,
         )
-        thread = QThread(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(self._on_runtime_state_ready)
+        worker.setParent(self)
+        worker.result_ready.connect(self._on_runtime_state_ready)
         worker.failed.connect(self._on_runtime_state_failed)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.failed.connect(thread.quit)
-        worker.failed.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._clear_runtime_state_worker)
         self._status_refresh_worker = worker
-        self._status_refresh_thread = thread
-        thread.start()
+        self._status_refresh_thread = worker
+        worker.finished.connect(self._clear_runtime_state_worker)
+        worker.start()
 
     def _on_runtime_state_ready(self, snapshot: RuntimeStateSnapshot, log_changes: bool, generation: int) -> None:
         if generation != self._refresh_generation:
@@ -1146,8 +1182,16 @@ class MainWindow(QMainWindow):
         )
         if self.connection_mode is ConnectionMode.WIFI:
             if self._available_devices:
+                self._wireless_no_device_poll_count = 0
                 self._wireless_setup_auto_opened = False
-            elif not self._wireless_setup_auto_opened:
+            else:
+                self._wireless_no_device_poll_count += 1
+            if (
+                not self._available_devices
+                and not self._wireless_setup_auto_opened
+                and not self._suspend_wireless_auto_open
+                and self._wireless_no_device_poll_count >= 2
+            ):
                 self.on_open_wireless_setup()
         self._set_wireless_action_state(
             has_device=self.connection_mode is ConnectionMode.WIFI and bool(self._available_devices),
@@ -1211,7 +1255,7 @@ class MainWindow(QMainWindow):
                 self.activity_panel.append_message(self._friendly_state_summary(self.current_connection))
             if self.current_connection.state is DeviceConnectionState.NO_DEVICE:
                 self._set_activity_summary(
-                    "No wireless device was detected. Use the pairing form if needed."
+                    "No wireless device was detected. Use Connect Device if needed."
                     if self.connection_mode is ConnectionMode.WIFI
                     else "No ready device was detected. Follow the setup guidance if needed.",
                     "warn",
@@ -1283,22 +1327,15 @@ class MainWindow(QMainWindow):
             adb_version_output=adb_version_output,
             destination_path=destination_path,
         )
-        thread = QThread(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
+        worker.setParent(self)
         worker.progress.connect(self._on_background_task_progress)
-        worker.finished.connect(self._on_background_task_finished)
+        worker.result_ready.connect(self._on_background_task_finished)
         worker.failed.connect(self._on_background_task_failed)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.failed.connect(thread.quit)
-        worker.failed.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._clear_background_task_worker)
         self._background_task_worker = worker
-        self._background_task_thread = thread
+        self._background_task_thread = worker
+        worker.finished.connect(self._clear_background_task_worker)
         self._sync_action_state()
-        thread.start()
+        worker.start()
 
     def _on_background_task_progress(self, message: str) -> None:
         self.activity_panel.append_message(message)
@@ -1368,21 +1405,14 @@ class MainWindow(QMainWindow):
             command_preview=command_preview,
             label=label,
         )
-        thread = QThread(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(self._on_adb_action_finished)
+        worker.setParent(self)
+        worker.result_ready.connect(self._on_adb_action_finished)
         worker.failed.connect(self._on_adb_action_failed)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.failed.connect(thread.quit)
-        worker.failed.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._clear_adb_action_worker)
         self._action_worker = worker
-        self._action_thread = thread
+        self._action_thread = worker
+        worker.finished.connect(self._clear_adb_action_worker)
         self._sync_action_state()
-        thread.start()
+        worker.start()
 
     def _handle_bootstrap_result(self, result: PlatformToolsBootstrapResult) -> None:
         if result.success:
@@ -1496,19 +1526,29 @@ class MainWindow(QMainWindow):
     def _on_adb_action_finished(self, outcome: AsyncADBActionResult) -> None:
         self._debug_log(f"ADB action finished: {outcome.action}")
         self._command_in_progress = False
+        queued_connect: tuple[str, str] | None = None
         match outcome.action:
             case "pair":
                 result = outcome.result
                 self.activity_panel.append_message(self._describe_command_feedback(result))
                 if result.success:
-                    self._set_activity_summary("Wireless pairing succeeded. Connect using the device's debug port.", "ready")
+                    if self._pending_wireless_connect is not None:
+                        host, port = self._pending_wireless_connect
+                        self._pending_wireless_connect = None
+                        self._set_activity_summary("Wireless pairing succeeded. Connecting now.", "ready")
+                        self.activity_panel.append_message(f"Pairing succeeded. Connecting to {host}:{port}.")
+                        queued_connect = (host, port)
+                    else:
+                        self._set_activity_summary("Wireless pairing succeeded. Connect using the device's debug port.", "ready")
                 else:
+                    self._pending_wireless_connect = None
                     self._set_activity_summary("Wireless pairing failed.", "error")
                     self._show_feedback_popup(title=outcome.label, message=result.describe(), tone="error")
             case "connect":
                 result = outcome.result
                 self.activity_panel.append_message(self._describe_command_feedback(result))
                 if not result.success:
+                    self._pending_wireless_connect = None
                     self._set_activity_summary("Wireless connection failed.", "error")
                     self._show_feedback_popup(title=outcome.label, message=result.describe(), tone="error")
                 else:
@@ -1516,13 +1556,27 @@ class MainWindow(QMainWindow):
                     if first_target:
                         self._preferred_device_serial = first_target
                     self._set_activity_summary("Wireless connection succeeded.", "ready")
+                    if self.wireless_setup_window is not None:
+                        self.wireless_setup_window.close()
                     self._refresh_runtime_state(log_changes=True, force_device_refresh=True)
             case "disconnect":
                 result = outcome.result
                 self.activity_panel.append_message(self._describe_command_feedback(result))
                 if result.success:
                     self._preferred_device_serial = None
-                    self._set_activity_summary("Wireless device disconnected.", "warn", popup=True, popup_title=outcome.label)
+                    self._set_activity_summary("Wireless device disconnected. Remove this computer from the phone if you want to forget it fully.", "warn")
+                    self._suspend_wireless_auto_open = True
+                    self._show_feedback_popup(
+                        title=outcome.label,
+                        message=(
+                            "The active wireless ADB session was disconnected.\n\n"
+                            "This does not remove the pairing stored on the Android device.\n"
+                            "To fully forget this computer, open Wireless debugging on the phone, "
+                            "open the paired devices/computers list, and remove this computer there."
+                        ),
+                        tone="warn",
+                    )
+                    self._suspend_wireless_auto_open = False
                 else:
                     self._set_activity_summary("Wireless disconnect failed.", "error")
                     self._show_feedback_popup(title=outcome.label, message=result.describe(), tone="error")
@@ -1557,6 +1611,9 @@ class MainWindow(QMainWindow):
                 self.activity_panel.append_message(f"Completed background action: {outcome.label}.")
         self._sync_action_state()
         self._drain_queued_refresh_if_idle()
+        if queued_connect is not None:
+            host, port = queued_connect
+            QTimer.singleShot(0, lambda: self.on_connect_wireless(host, port))
 
     def _on_adb_action_failed(self, action: str, message: str) -> None:
         self._debug_log(f"ADB action failed: {action} -> {message}")
@@ -2124,11 +2181,23 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         self.status_timer.stop()
         self.capture_tail_timer.stop()
+        for window in [self.wireless_setup_window, self.guide_window, self.advanced_window, self.export_picker_window]:
+            if window is not None:
+                window.close()
         if self.capture_manager.active_session is not None:
             result = self.capture_manager.stop_capture()
             self.latest_log_path = result.log_path or self.latest_log_path
         self._flush_capture_log(final=True)
+        self._wait_for_thread(self._status_refresh_thread, timeout_ms=9000)
+        self._wait_for_thread(self._action_thread, timeout_ms=25000)
+        self._wait_for_thread(self._background_task_thread, timeout_ms=25000)
         self._debug_log("Application closing. Sending adb kill-server.")
         self.adb_manager.kill_server()
         self._disable_debug_logging()
         super().closeEvent(event)
+
+    def _wait_for_thread(self, thread: QThread | None, *, timeout_ms: int) -> None:
+        if thread is None or not thread.isRunning():
+            return
+        self._debug_log(f"Waiting for thread shutdown: {thread.objectName() or '<unnamed>'}")
+        thread.wait(timeout_ms)
