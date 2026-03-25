@@ -5,8 +5,8 @@ from pathlib import Path
 import shlex
 
 from PySide6.QtCore import QObject, QSize, QThread, QTimer, Signal
-from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtGui import QCloseEvent, QResizeEvent
+from PySide6.QtWidgets import QApplication, QBoxLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from core.adb_manager import ADBManager, CommandResult, DeviceDiscovery, DeviceInfoResult
 from core.device_info import DeviceInfo
@@ -137,6 +137,7 @@ class MainWindow(QMainWindow):
         self.status_timer.setInterval(4000)
         self.capture_tail_timer = QTimer(self)
         self.capture_tail_timer.setInterval(400)
+        self._content_side_by_side = False
 
         self._build_layout()
         self._apply_styles()
@@ -184,8 +185,13 @@ class MainWindow(QMainWindow):
         self.main_layout = layout
         layout.addWidget(header_widget)
         layout.addWidget(self.action_bar)
-        layout.addWidget(self.central_panel, stretch=3)
-        layout.addWidget(self.activity_panel, stretch=2)
+        self.content_widget = QWidget()
+        self.content_layout = QBoxLayout(QBoxLayout.TopToBottom, self.content_widget)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(16)
+        self.content_layout.addWidget(self.central_panel, 3)
+        self.content_layout.addWidget(self.activity_panel, 2)
+        layout.addWidget(self.content_widget, stretch=1)
         self.setCentralWidget(root)
 
     def _apply_styles(self) -> None:
@@ -1178,6 +1184,11 @@ class MainWindow(QMainWindow):
         target_size = self.sizeHint().expandedTo(QSize(1380, 940))
         self.resize(target_size)
         self.setMinimumSize(target_size)
+        self._update_content_layout_mode()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_content_layout_mode()
 
     def _poll_capture_log(self) -> None:
         self._flush_capture_log(final=False)
@@ -1273,6 +1284,27 @@ class MainWindow(QMainWindow):
         self.wifi_mode_button.setChecked(self.connection_mode is ConnectionMode.WIFI)
         self.usb_mode_button.blockSignals(False)
         self.wifi_mode_button.blockSignals(False)
+
+    def _update_content_layout_mode(self) -> None:
+        available_height = max(0, self.height() - 220)
+        central_height_hint = self.central_panel.sizeHint().height()
+        should_use_side_by_side = available_height < central_height_hint + 220
+        if should_use_side_by_side == self._content_side_by_side:
+            return
+
+        self._content_side_by_side = should_use_side_by_side
+        if should_use_side_by_side:
+            self.content_layout.setDirection(QBoxLayout.LeftToRight)
+            self.content_layout.setStretch(0, 3)
+            self.content_layout.setStretch(1, 2)
+            self.activity_panel.setMinimumWidth(420)
+            self.activity_panel.setMinimumHeight(0)
+        else:
+            self.content_layout.setDirection(QBoxLayout.TopToBottom)
+            self.content_layout.setStretch(0, 3)
+            self.content_layout.setStretch(1, 2)
+            self.activity_panel.setMinimumWidth(0)
+            self.activity_panel.setMinimumHeight(180)
 
     def _set_device_choices(
         self,

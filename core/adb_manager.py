@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import subprocess
+import sys
 
 from core.device_info import DeviceInfo, detect_getprop_problem, parse_getprop_output
 from core.device_state import (
@@ -72,6 +73,16 @@ class ADBManager:
         command.extend(args)
         return command
 
+    def build_subprocess_kwargs(self) -> dict[str, object]:
+        kwargs: dict[str, object] = {}
+        if sys.platform.startswith("win"):
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            kwargs["creationflags"] = creationflags
+            kwargs["startupinfo"] = startupinfo
+        return kwargs
+
     def run(self, args: list[str], *, serial: str | None = None, timeout: float | None = None) -> CommandResult:
         command = self.build_command(args, serial=serial)
 
@@ -92,6 +103,7 @@ class ADBManager:
                 text=True,
                 timeout=timeout or self.default_timeout,
                 check=False,
+                **self.build_subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout or ""

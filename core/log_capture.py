@@ -72,6 +72,7 @@ class LogCaptureManager:
                 stdout=log_handle,
                 stderr=subprocess.PIPE,
                 text=True,
+                **self.adb_manager.build_subprocess_kwargs(),
             )
         except OSError as exc:
             log_handle.close()
