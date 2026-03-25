@@ -41,6 +41,7 @@ class CentralPanel(QWidget):
 
         self._mode = ConnectionMode.USB
         self._wireless_connection: DeviceConnection | None = None
+        self._wireless_action_target = ""
 
         self.stack = QStackedLayout(self)
         self.guidance_page = self._build_guidance_page()
@@ -100,6 +101,7 @@ class CentralPanel(QWidget):
         title, message, next_step = describe_connection_state(connection, mode=self._mode)
         if self._mode is ConnectionMode.WIFI:
             self._wireless_connection = connection
+            self._wireless_action_target = connection.serial or ""
             self.wireless_title.setText(title)
             if connection.state is DeviceConnectionState.NO_DEVICE:
                 self.wireless_status_label.setText(
@@ -120,10 +122,6 @@ class CentralPanel(QWidget):
         field_map = self.wireless_device_fields if self._mode is ConnectionMode.WIFI else self.device_fields
         self._populate_field_map(field_map, info)
         if self._mode is ConnectionMode.WIFI:
-            self._wireless_connection = DeviceConnection(
-                state=DeviceConnectionState.READY,
-                serial=info.serial_number,
-            )
             self.wireless_title.setText("Wireless ADB Setup")
             self.wireless_status_label.setText(f"Wireless target connected and ready: {info.serial_number}")
             self.stack.setCurrentWidget(self.wireless_page)
@@ -140,6 +138,7 @@ class CentralPanel(QWidget):
                 state=DeviceConnectionState.READY,
                 serial=serial,
             )
+            self._wireless_action_target = serial
             self.wireless_title.setText("Wireless ADB Setup")
             self.wireless_status_label.setText(message)
             self.stack.setCurrentWidget(self.wireless_page)
@@ -153,7 +152,7 @@ class CentralPanel(QWidget):
         self.stack.setCurrentWidget(self.capture_page)
 
     def current_wireless_endpoint(self) -> str:
-        return self._wireless_connection.serial if self._wireless_connection and self._wireless_connection.serial else ""
+        return self._wireless_action_target
 
     def _build_guidance_page(self) -> QWidget:
         card = QFrame()

@@ -107,6 +107,25 @@ def select_preferred_device(
         selected = next((device for device in visible_devices if device.serial == preferred_serial), None)
         if selected is not None:
             normalized = normalize_device_state(selected.raw_state)
+            if normalized is DeviceConnectionState.READY:
+                return DeviceConnection(
+                    state=normalized,
+                    serial=selected.serial,
+                    raw_state=selected.raw_state,
+                )
+
+            if mode is ConnectionMode.WIFI:
+                fallback_ready = next(
+                    (device for device in visible_devices if normalize_device_state(device.raw_state) is DeviceConnectionState.READY),
+                    None,
+                )
+                if fallback_ready is not None:
+                    return DeviceConnection(
+                        state=DeviceConnectionState.READY,
+                        serial=fallback_ready.serial,
+                        raw_state=fallback_ready.raw_state,
+                    )
+
             if normalized is DeviceConnectionState.ERROR:
                 return DeviceConnection(
                     state=DeviceConnectionState.ERROR,

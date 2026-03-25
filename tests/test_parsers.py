@@ -65,6 +65,22 @@ class DeviceStateParsingTests(unittest.TestCase):
         self.assertEqual(connection.state, DeviceConnectionState.READY)
         self.assertEqual(connection.serial, "192.168.1.22:40283")
 
+    def test_select_preferred_device_falls_back_to_ready_target_when_preferred_is_not_ready(self) -> None:
+        output = (
+            "List of devices attached\n"
+            "192.168.1.22:40283\toffline\n"
+            "192.168.1.22:37615\tdevice\n"
+        )
+        devices = parse_adb_devices_output(output)
+        connection = select_preferred_device(
+            devices,
+            preferred_serial="192.168.1.22:40283",
+            mode=ConnectionMode.WIFI,
+        )
+
+        self.assertEqual(connection.state, DeviceConnectionState.READY)
+        self.assertEqual(connection.serial, "192.168.1.22:37615")
+
     def test_normalize_device_state_maps_supported_values(self) -> None:
         self.assertEqual(normalize_device_state("device"), DeviceConnectionState.READY)
         self.assertEqual(normalize_device_state("unauthorized"), DeviceConnectionState.UNAUTHORIZED)

@@ -1126,7 +1126,24 @@ class MainWindow(QMainWindow):
             return
 
         discovery = snapshot.discovery
+        self._debug_log(
+            "Runtime discovery devices: "
+            + (
+                ", ".join(f"{device.serial} [{device.raw_state}]" for device in discovery.devices)
+                if discovery.devices
+                else "<none>"
+            )
+            + f" | mode={self.connection_mode.value} | preferred={self._preferred_device_serial}"
+        )
         self._available_devices = filter_devices_for_mode(discovery.devices, self.connection_mode)
+        self._debug_log(
+            "Runtime visible devices: "
+            + (
+                ", ".join(f"{device.serial} [{device.raw_state}]" for device in self._available_devices)
+                if self._available_devices
+                else "<none>"
+            )
+        )
         if self.connection_mode is ConnectionMode.WIFI:
             if self._available_devices:
                 self._wireless_setup_auto_opened = False
@@ -1151,6 +1168,11 @@ class MainWindow(QMainWindow):
         connection_changed = current_signature != previous_signature
         self._last_connection_signature = current_signature
         self.current_connection = discovery.connection
+        self._debug_log(
+            f"Runtime selected connection: state={self.current_connection.state.value}, "
+            f"serial={self.current_connection.serial}, raw_state={self.current_connection.raw_state}, "
+            f"detail={self.current_connection.detail}"
+        )
         if self.current_connection.serial is not None:
             self._preferred_device_serial = self.current_connection.serial
         elif not self._available_devices:
