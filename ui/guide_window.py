@@ -10,11 +10,15 @@ class GuideWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("Lazy ADB Wizard - Setup Guide")
         self.resize(1180, 860)
+        self.setObjectName("GuideWindow")
 
         scroll = QScrollArea()
+        scroll.setObjectName("GuideScroll")
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
 
         container = QWidget()
+        container.setObjectName("GuideContainer")
         self.content_layout = QVBoxLayout(container)
         self.content_layout.setContentsMargins(20, 20, 20, 20)
         self.content_layout.setSpacing(16)

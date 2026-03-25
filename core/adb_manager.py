@@ -133,6 +133,9 @@ class ADBManager:
     def get_version(self) -> CommandResult:
         return self.run(["version"])
 
+    def kill_server(self) -> CommandResult:
+        return self.run(["kill-server"], timeout=5.0)
+
     def clear_logcat(self, serial: str) -> CommandResult:
         return self.run(["logcat", "-c"], serial=serial, timeout=12.0)
 
