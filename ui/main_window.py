@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import shlex
 
-from PySide6.QtCore import QSize, QTimer
+from PySide6.QtCore import QObject, QSize, QThread, QTimer, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
-from core.adb_manager import ADBManager, DeviceInfoResult
+from core.adb_manager import ADBManager, CommandResult, DeviceDiscovery, DeviceInfoResult
 from core.device_info import DeviceInfo
 from core.device_state import ConnectionMode, DeviceConnection, DeviceConnectionState, ListedDevice, filter_devices_for_mode
 from core.exporter import SupportPackageExporter
@@ -21,6 +22,76 @@ from ui.guide_window import GuideWindow
 from ui.status_panel import StatusPanel
 from ui.wireless_setup_window import WirelessSetupWindow
 from utils.platform_paths import describe_host_system
+
+
+@dataclass(slots=True)
+class RuntimeStateSnapshot:
+    adb_result: CommandResult | None
+    discovery: DeviceDiscovery
+    device_info_result: DeviceInfoResult | None
+
+
+class RuntimeStateWorker(QObject):
+    finished = Signal(object, bool, int)
+    failed = Signal(str, bool, int)
+
+    def __init__(
+        self,
+        *,
+        adb_path,
+        default_timeout: float,
+        preferred_serial: str | None,
+        mode: ConnectionMode,
+        check_adb_version: bool,
+        known_device_serial: str | None,
+        has_device_info: bool,
+        force_device_refresh: bool,
+        log_changes: bool,
+        generation: int,
+    ) -> None:
+        super().__init__()
+        self._adb_path = adb_path
+        self._default_timeout = default_timeout
+        self._preferred_serial = preferred_serial
+        self._mode = mode
+        self._check_adb_version = check_adb_version
+        self._known_device_serial = known_device_serial
+        self._has_device_info = has_device_info
+        self._force_device_refresh = force_device_refresh
+        self._log_changes = log_changes
+        self._generation = generation
+
+    def run(self) -> None:
+        try:
+            manager = ADBManager(adb_path=self._adb_path, default_timeout=self._default_timeout)
+            adb_result = manager.get_version() if self._check_adb_version else None
+            discovery = manager.detect_devices(
+                preferred_serial=self._preferred_serial,
+                mode=self._mode,
+            )
+            should_fetch_info = (
+                discovery.connection.state is DeviceConnectionState.READY
+                and discovery.connection.serial is not None
+                and (
+                    self._force_device_refresh
+                    or not self._has_device_info
+                    or discovery.connection.serial != self._known_device_serial
+                )
+            )
+            device_info_result = None
+            if should_fetch_info and discovery.connection.serial is not None:
+                device_info_result = manager.read_device_info(discovery.connection.serial)
+            self.finished.emit(
+                RuntimeStateSnapshot(
+                    adb_result=adb_result,
+                    discovery=discovery,
+                    device_info_result=device_info_result,
+                ),
+                self._log_changes,
+                self._generation,
+            )
+        except Exception as exc:  # pragma: no cover - defensive UI worker guard
+            self.failed.emit(str(exc), self._log_changes, self._generation)
 
 
 class MainWindow(QMainWindow):
@@ -44,6 +115,12 @@ class MainWindow(QMainWindow):
         self._capture_partial_line = ""
         self._platform_tools_bootstrap_failed = False
         self._wireless_setup_auto_opened = False
+        self._adb_version_checked = False
+        self._status_refresh_thread: QThread | None = None
+        self._status_refresh_worker: RuntimeStateWorker | None = None
+        self._status_refresh_in_progress = False
+        self._queued_refresh: tuple[bool, bool] | None = None
+        self._refresh_generation = 0
 
         self.setWindowTitle("Lazy ADB Wizard")
 
@@ -57,7 +134,7 @@ class MainWindow(QMainWindow):
         self.usb_mode_button = QPushButton("USB")
         self.wifi_mode_button = QPushButton("Wi-Fi")
         self.status_timer = QTimer(self)
-        self.status_timer.setInterval(2000)
+        self.status_timer.setInterval(4000)
         self.capture_tail_timer = QTimer(self)
         self.capture_tail_timer.setInterval(400)
 
@@ -459,11 +536,13 @@ class MainWindow(QMainWindow):
             return
 
         self.connection_mode = mode
+        self._refresh_generation += 1
         self._wireless_setup_auto_opened = False
         self._preferred_device_serial = None
         self._available_devices = []
         self.current_device_info = None
         self.current_connection = DeviceConnection(state=DeviceConnectionState.NO_DEVICE)
+        self._adb_version_checked = False
         self._set_device_choices(choices=[], selected_serial=None, enabled=False)
         self.central_panel.set_mode(mode)
         self.central_panel.show_guidance(self.current_connection)
@@ -693,6 +772,7 @@ class MainWindow(QMainWindow):
         if self._platform_tools_bootstrap_failed and not allow_retry:
             self._available_devices = []
             self._preferred_device_serial = None
+            self._adb_version_checked = False
             self._set_device_choices(choices=[], selected_serial=None, enabled=False)
             self.central_panel.set_wireless_action_state(
                 has_device=False,
@@ -746,6 +826,7 @@ class MainWindow(QMainWindow):
         self._platform_tools_bootstrap_failed = True
         self._available_devices = []
         self._preferred_device_serial = None
+        self._adb_version_checked = False
         self._set_device_choices(choices=[], selected_serial=None, enabled=False)
         self.central_panel.set_wireless_action_state(
             has_device=False,
@@ -773,15 +854,72 @@ class MainWindow(QMainWindow):
             self._sync_action_state()
             return
 
-        adb_result = self.adb_manager.get_version()
-        adb_status = self._describe_adb_status(adb_result)
-        self.status_panel.set_adb_status(
-            "Active" if adb_result.success else "Inactive",
-            tone="ready" if adb_result.success else "error",
-            tooltip=adb_status,
+        if self._status_refresh_in_progress:
+            if self._queued_refresh is None:
+                self._queued_refresh = (log_changes, force_device_refresh)
+            else:
+                queued_log_changes, queued_force_refresh = self._queued_refresh
+                self._queued_refresh = (
+                    queued_log_changes or log_changes,
+                    queued_force_refresh or force_device_refresh,
+                )
+            return
+
+        self._start_runtime_state_worker(log_changes=log_changes, force_device_refresh=force_device_refresh)
+
+    def _start_runtime_state_worker(self, *, log_changes: bool, force_device_refresh: bool) -> None:
+        self._status_refresh_in_progress = True
+        worker = RuntimeStateWorker(
+            adb_path=self.adb_manager.adb_path,
+            default_timeout=self.adb_manager.default_timeout,
+            preferred_serial=self._preferred_device_serial,
+            mode=self.connection_mode,
+            check_adb_version=not self._adb_version_checked,
+            known_device_serial=self.current_connection.serial,
+            has_device_info=self.current_device_info is not None,
+            force_device_refresh=force_device_refresh,
+            log_changes=log_changes,
+            generation=self._refresh_generation,
         )
-        if adb_result.success:
-            self.latest_adb_version_output = adb_result.stdout
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_runtime_state_ready)
+        worker.failed.connect(self._on_runtime_state_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(thread.quit)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_runtime_state_worker)
+        self._status_refresh_worker = worker
+        self._status_refresh_thread = thread
+        thread.start()
+
+    def _on_runtime_state_ready(self, snapshot: RuntimeStateSnapshot, log_changes: bool, generation: int) -> None:
+        if generation != self._refresh_generation:
+            self._complete_runtime_state_refresh()
+            return
+        adb_result = snapshot.adb_result
+        if adb_result is not None:
+            adb_status = self._describe_adb_status(adb_result)
+            self.status_panel.set_adb_status(
+                "Active" if adb_result.success else "Inactive",
+                tone="ready" if adb_result.success else "error",
+                tooltip=adb_status,
+            )
+            if adb_result.success:
+                self.latest_adb_version_output = adb_result.stdout
+                self._adb_version_checked = True
+            else:
+                self._adb_version_checked = False
+        elif snapshot.discovery.command_result.success:
+            adb_status = self._last_adb_status or "ADB is available."
+            self.status_panel.set_adb_status("Active", tone="ready", tooltip=adb_status)
+        else:
+            adb_status = snapshot.discovery.command_result.describe()
+            self.status_panel.set_adb_status("Inactive", tone="error", tooltip=adb_status)
+            self._adb_version_checked = False
 
         adb_changed = adb_status != self._last_adb_status
         if adb_changed:
@@ -789,7 +927,7 @@ class MainWindow(QMainWindow):
             if log_changes:
                 self.activity_panel.append_message(adb_status)
 
-        if not adb_result.success:
+        if not snapshot.discovery.command_result.success and not snapshot.discovery.devices:
             self._available_devices = []
             self._preferred_device_serial = None
             self._set_device_choices(choices=[], selected_serial=None, enabled=False)
@@ -800,7 +938,7 @@ class MainWindow(QMainWindow):
             )
             self.current_connection = DeviceConnection(
                 state=DeviceConnectionState.ERROR,
-                detail=adb_result.describe(),
+                detail=snapshot.discovery.command_result.describe(),
             )
             self.current_device_info = None
             self.status_panel.set_connection_status(
@@ -812,13 +950,10 @@ class MainWindow(QMainWindow):
                 self.central_panel.show_guidance(self.current_connection)
             if log_changes:
                 self._set_activity_summary("ADB is unavailable, so device detection could not continue.", "error")
-            self._sync_action_state()
+            self._complete_runtime_state_refresh()
             return
 
-        discovery = self.adb_manager.detect_devices(
-            preferred_serial=self._preferred_device_serial,
-            mode=self.connection_mode,
-        )
+        discovery = snapshot.discovery
         self._available_devices = filter_devices_for_mode(discovery.devices, self.connection_mode)
         if self.connection_mode is ConnectionMode.WIFI:
             if self._available_devices:
@@ -861,19 +996,13 @@ class MainWindow(QMainWindow):
         )
 
         if self.current_connection.state is DeviceConnectionState.READY and self.current_connection.serial:
-            should_fetch_info = (
-                force_device_refresh
-                or self.current_device_info is None
-                or previous_signature is None
-                or previous_signature[1] != self.current_connection.serial
-            )
             if connection_changed and log_changes:
                 self.activity_panel.append_message(
                     f"Detected device {self.current_connection.serial} ({self.current_connection.raw_state})."
                 )
-            if should_fetch_info:
+            if snapshot.device_info_result is not None:
                 self._apply_device_info_result(
-                    self.adb_manager.read_device_info(self.current_connection.serial),
+                    snapshot.device_info_result,
                     announce_success=log_changes,
                 )
             elif self.capture_manager.active_session is None and self.current_device_info is not None:
@@ -889,8 +1018,7 @@ class MainWindow(QMainWindow):
                 self._set_activity_summary(
                     "No wireless device was detected. Use the pairing form if needed."
                     if self.connection_mode is ConnectionMode.WIFI
-                    else "No ready device was detected. Follow the setup guidance if needed."
-                    ,
+                    else "No ready device was detected. Follow the setup guidance if needed.",
                     "warn",
                 )
             else:
@@ -899,7 +1027,44 @@ class MainWindow(QMainWindow):
                     self._connection_tone(self.current_connection),
                 )
 
+        self._complete_runtime_state_refresh()
+
+    def _on_runtime_state_failed(self, message: str, log_changes: bool, generation: int) -> None:
+        if generation != self._refresh_generation:
+            self._complete_runtime_state_refresh()
+            return
+        self._adb_version_checked = False
+        self.current_connection = DeviceConnection(
+            state=DeviceConnectionState.ERROR,
+            detail=message,
+        )
+        self.status_panel.set_adb_status("Inactive", tone="error", tooltip=message)
+        self.status_panel.set_connection_status("Disconnected", tone="error", tooltip=message)
+        if self.capture_manager.active_session is None:
+            self.central_panel.show_guidance(self.current_connection)
+        if log_changes:
+            self._set_activity_summary("Background device refresh failed.", "error")
+            self.activity_panel.append_message(message)
+        self._complete_runtime_state_refresh()
+
+    def _clear_runtime_state_worker(self) -> None:
+        self._status_refresh_thread = None
+        self._status_refresh_worker = None
+
+    def _complete_runtime_state_refresh(self) -> None:
+        self._status_refresh_in_progress = False
         self._sync_action_state()
+        if self._queued_refresh is None:
+            return
+        log_changes, force_device_refresh = self._queued_refresh
+        self._queued_refresh = None
+        QTimer.singleShot(
+            0,
+            lambda: self._refresh_runtime_state(
+                log_changes=log_changes,
+                force_device_refresh=force_device_refresh,
+            ),
+        )
 
     def _apply_device_info_result(self, result: DeviceInfoResult, *, announce_success: bool) -> None:
         if result.device_info is not None:
@@ -1132,6 +1297,8 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self.status_timer.stop()
+        self.capture_tail_timer.stop()
         if self.capture_manager.active_session is not None:
             result = self.capture_manager.stop_capture()
             self.latest_log_path = result.log_path or self.latest_log_path
