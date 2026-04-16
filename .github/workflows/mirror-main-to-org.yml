@@ -1,6 +1,4 @@
-cat > .github/workflows/mirror-main-to-org.yml <<'EOF'
 name: Mirror main to org repo
-
 on:
   push:
     branches:
@@ -34,4 +32,3 @@ jobs:
       - name: Push only main
         run: |
           git push org-mirror main:main
-EOF
