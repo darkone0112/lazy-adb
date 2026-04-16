@@ -31,4 +31,4 @@ jobs:
 
       - name: Push only main
         run: |
-          git push org-mirror main:main
+          git push --force org-mirror main:main
