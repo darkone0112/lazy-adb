@@ -1,4 +1,5 @@
 name: Mirror main to org repo
+
 on:
   push:
     branches:
@@ -7,6 +8,7 @@ on:
 
 jobs:
   mirror-main:
+    if: github.repository == 'darkone0112/lazy-adb-wizard'
     runs-on: ubuntu-latest
 
     steps:
@@ -31,4 +33,4 @@ jobs:
 
       - name: Push only main
         run: |
-          git push --force org-mirror main:main
+          git push org-mirror main:main
