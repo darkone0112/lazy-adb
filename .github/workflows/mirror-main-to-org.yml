@@ -8,7 +8,7 @@ on:
 
 jobs:
   mirror-main:
-    if: github.repository == 'darkone0112/lazy-adb-wizard'
+    if: github.repository == 'darkone0112/lazy-adb'
     runs-on: ubuntu-latest
 
     steps:
@@ -29,7 +29,7 @@ jobs:
 
       - name: Add org mirror remote
         run: |
-          git remote add org-mirror git@github.com:Newline-Interactive-EU/lazy-adb-wizard.git
+          git remote add org-mirror git@github.com:Newline-Interactive-EU/lazy-adb.git
 
       - name: Push only main
         run: |
